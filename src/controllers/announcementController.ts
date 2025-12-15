@@ -57,7 +57,7 @@ export const createAnnouncement = async (req: AuthRequest, res: Response) => {
     const announcement = new AnnouncementModel({
       title,
       content, // Admin writes full announcement text (includes date, time, location, etc.)
-      createdBy: req.user.memberId
+      createdBy: req.user.sispaId
     });
 
     await announcement.save();

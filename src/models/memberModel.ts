@@ -1,13 +1,13 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface IMember extends Document {
-  memberId: string;
+  sispaId: string; // Primary identifier - SISPA ID for member login
   name: string;
   email: string; 
   batch: string;
   password: string;
   role: 'admin' | 'member';
-  sispaId?: string; // SISPA ID for member login (editable)
+  memberId?: string; // Optional - kept for backward compatibility, can be removed later
   matricNumber?: string; // NO. MATRIC
   phoneNumber?: string; // NO. PHONE
   profilePicture?: string; // URL or path to profile picture
@@ -17,7 +17,7 @@ export interface IMember extends Document {
 }
 
 const MemberSchema = new Schema<IMember>({
-  memberId: { type: String, required: true, unique: true },
+  sispaId: { type: String, required: true, unique: true }, // Primary identifier
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   batch: { type: String, required: true },
@@ -28,7 +28,7 @@ const MemberSchema = new Schema<IMember>({
     default: 'member',
     required: true 
   },
-  sispaId: { type: String, unique: true, sparse: true }, // Sparse index allows multiple nulls, editable
+  memberId: { type: String, unique: true, sparse: true }, // Optional - for backward compatibility
   matricNumber: { type: String, default: null },
   phoneNumber: { type: String, default: null },
   profilePicture: { type: String, default: null }, // URL or path to uploaded image

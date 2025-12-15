@@ -4,9 +4,9 @@ import jwt from 'jsonwebtoken';
 // Extend Express Request to include user info
 export interface AuthRequest extends Request {
   user?: {
-    memberId: string;
+    sispaId: string; // Primary identifier
     role: 'admin' | 'member';
-    sispaId?: string;
+    memberId?: string; // Optional - for backward compatibility
   };
 }
 
@@ -22,9 +22,9 @@ export const authenticate = (req: AuthRequest, res: Response, next: NextFunction
     }
 
     const decoded = jwt.verify(token, JWT_SECRET) as {
-      memberId: string;
+      sispaId: string; // Primary identifier
       role: 'admin' | 'member';
-      sispaId?: string;
+      memberId?: string; // Optional - for backward compatibility
     };
 
     req.user = decoded;

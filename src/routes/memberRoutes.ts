@@ -8,9 +8,15 @@ import {
   resetPassword,
   loginMember,
   getOwnProfile,
-  updateOwnProfile
+  updateOwnProfile,
+  signUp
 } from "../controllers/memberController";
 import { getUserDashboard } from "../controllers/dashboardController";
+import { 
+  getMemberUniform, 
+  createMemberUniform, 
+  updateMemberUniform 
+} from "../controllers/uniformController";
 import { authenticate, authorizeAdmin } from "../middleware/auth";
 
 const router = express.Router();
@@ -18,6 +24,9 @@ const router = express.Router();
 // ===============================
 // PUBLIC ROUTES (No auth required)
 // ===============================
+// Sign up / Register new account
+router.post("/signup", signUp);
+
 // Login (supports both memberId and sispaId)
 router.post("/login", loginMember);
 
@@ -38,6 +47,15 @@ router.get("/profile", authenticate, getOwnProfile);
 
 // Update own profile (MUST be before /:id route)
 router.put("/profile", authenticate, updateOwnProfile);
+
+// Get own uniform collection
+router.get("/uniform", authenticate, getMemberUniform);
+
+// Create/add uniform items (adds to existing if exists)
+router.post("/uniform", authenticate, createMemberUniform);
+
+// Update/replace all uniform items
+router.put("/uniform", authenticate, updateMemberUniform);
 
 // ===============================
 // ADMIN ROUTES (Admin only)

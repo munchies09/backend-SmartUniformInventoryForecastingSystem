@@ -30,6 +30,36 @@ app.use('/api/members', memberRoutes);
 app.use('/api/batches', batchRoutes);
 app.use('/api/announcements', announcementRoutes);
 
+// Global error handler middleware (must be after all routes)
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Global error handler:', err);
+  
+  // Don't send response if headers already sent
+  if (res.headersSent) {
+    return next(err);
+  }
+  
+  // Send error response
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message || 'Internal server error',
+    ...(process.env.NODE_ENV === 'development' && { error: err.stack })
+  });
+});
+
+// 404 handler (must be after all routes and error handler)
+app.use((req: express.Request, res: express.Response) => {
+  // Don't send response if headers already sent
+  if (res.headersSent) {
+    return;
+  }
+  
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
+  });
+});
+
 // Connect to MongoDB
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB connected successfully'))
