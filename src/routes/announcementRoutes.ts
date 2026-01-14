@@ -1,7 +1,7 @@
 import express from 'express';
 import {
   getAnnouncements,
-  getAnnouncement,
+  getLatestAnnouncement,
   createAnnouncement,
   updateAnnouncement,
   deleteAnnouncement
@@ -11,24 +11,25 @@ import { authenticate, authorizeAdmin } from '../middleware/auth';
 const router = express.Router();
 
 // ===============================
-// MEMBER ROUTES (View announcements)
+// MEMBER/ADMIN ROUTES (View announcements)
 // ===============================
-// Get all announcements (for dashboard)
-router.get('/', authenticate, getAnnouncements);
+// Get latest announcement (Member or Admin can access)
+router.get('/latest', authenticate, getLatestAnnouncement);
 
-// Get single announcement
-router.get('/:id', authenticate, getAnnouncement);
+// Get all announcements (Member or Admin can access - both can view)
+router.get('/', authenticate, getAnnouncements);
 
 // ===============================
 // ADMIN ROUTES (Manage announcements)
 // ===============================
-// Create announcement
+
+// Create announcement (Admin only)
 router.post('/', authenticate, authorizeAdmin, createAnnouncement);
 
-// Update announcement
+// Update announcement (Admin only)
 router.put('/:id', authenticate, authorizeAdmin, updateAnnouncement);
 
-// Delete announcement
+// Delete announcement (Admin only)
 router.delete('/:id', authenticate, authorizeAdmin, deleteAnnouncement);
 
 export default router;

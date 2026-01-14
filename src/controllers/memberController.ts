@@ -6,14 +6,47 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { JWT_SECRET } from '../middleware/auth';
 import { AuthRequest } from '../middleware/auth';
+import { normalizeBatch, normalizeBatchForResponse } from '../utils/batchNormalizer';
 
-// Get all members
+// Get all members (Admin only) - Returns all members excluding admin, arranged by batch
 export const getMembers = async (req: Request, res: Response) => {
   try {
-    const members = await MemberModel.find();
-    res.json(members);
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching members', error });
+    // Find all members except admin (sispaId: "admin")
+    const members = await MemberModel.find({ sispaId: { $ne: 'admin' } })
+      .select('-password -resetPasswordToken -resetPasswordExpires')
+      .sort({ batch: 1, name: 1 }); // Sort by batch first, then by name
+    
+    // Format members to match frontend spec
+    const formattedMembers = members.map(member => {
+      const memberDoc = member as any; // Type assertion for mongoose document
+      return {
+        id: String(memberDoc._id),
+        sispaId: member.sispaId,
+        name: member.name,
+        email: member.email,
+        role: member.role,
+        batch: normalizeBatchForResponse(member.batch) || "", // Normalize batch format
+        gender: member.gender || null, // ✅ CRITICAL: Include gender field (required by frontend)
+        matricNumber: member.matricNumber || null,
+        phoneNumber: member.phoneNumber || null,
+        profilePicture: member.profilePicture || null,
+        createdAt: memberDoc.createdAt,
+        updatedAt: memberDoc.updatedAt
+      };
+    });
+
+    res.json({
+      success: true,
+      members: formattedMembers,
+      total: formattedMembers.length
+    });
+  } catch (error: any) {
+    console.error('Error fetching members:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error fetching members', 
+      error: error.message 
+    });
   }
 };
 
@@ -22,7 +55,7 @@ export const getMembers = async (req: Request, res: Response) => {
 // ===============================
 export const signUp = async (req: Request, res: Response) => {
   try {
-    const { sispaId, name, email, batch, password, memberId, matricNumber, profilePicture } = req.body;
+    const { sispaId, name, email, batch, password, matricNumber, profilePicture } = req.body;
 
     // Validate required fields - sispaId is now required
     if (!sispaId || !name || !email || !batch || !password) {
@@ -32,9 +65,13 @@ export const signUp = async (req: Request, res: Response) => {
       });
     }
 
+    // Normalize inputs: SISPA ID to uppercase, email to lowercase
+    const normalizedSispaId = sispaId.trim().toUpperCase();
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!emailRegex.test(normalizedEmail)) {
       return res.status(400).json({ 
         success: false,
         message: 'Invalid email format' 
@@ -49,51 +86,75 @@ export const signUp = async (req: Request, res: Response) => {
       });
     }
 
-    // Check if SISPA ID already exists
-    const existingSispaId = await MemberModel.findOne({ sispaId });
+    // Check if SISPA ID already exists (case-insensitive check)
+    // First try exact match with normalized value (most common case)
+    let existingSispaId = await MemberModel.findOne({ sispaId: normalizedSispaId });
+    
+    // If not found, try case-insensitive regex search (for backward compatibility with existing data)
+    if (!existingSispaId) {
+      existingSispaId = await MemberModel.findOne({ 
+        sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
+    
     if (existingSispaId) {
+      console.log('Duplicate SISPA ID detected:', {
+        requested: normalizedSispaId,
+        existing: existingSispaId.sispaId
+      });
       return res.status(400).json({ 
         success: false,
-        message: 'SISPA ID already exists. Please use a different SISPA ID or try logging in.' 
+        message: `SISPA ID "${normalizedSispaId}" already exists. Please use a different SISPA ID or try logging in.` 
       });
     }
 
-    // Check if email already exists
-    const existingEmail = await MemberModel.findOne({ email });
+    // Check if email already exists (case-insensitive check)
+    // First try exact match with normalized value (most common case)
+    let existingEmail = await MemberModel.findOne({ email: normalizedEmail });
+    
+    // If not found, try case-insensitive regex search (for backward compatibility with existing data)
+    if (!existingEmail) {
+      existingEmail = await MemberModel.findOne({ 
+        email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
+    
     if (existingEmail) {
+      console.log('Duplicate email detected:', {
+        requested: normalizedEmail,
+        existing: existingEmail.email
+      });
       return res.status(400).json({ 
         success: false,
         message: 'Email already exists. Please use a different email or try logging in.' 
       });
     }
 
-    // Check if memberId already exists (if provided - optional)
-    if (memberId) {
-      const existingMemberId = await MemberModel.findOne({ memberId });
-      if (existingMemberId) {
-        return res.status(400).json({ 
-          success: false,
-          message: 'Member ID already exists. Please use a different Member ID.' 
-        });
-      }
-    }
 
     // Hash password before saving
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // Normalize batch if provided (optional field)
+    const normalizedBatch = batch ? normalizeBatch(batch) : null;
+
     // Create new member with hashed password (role defaults to 'member')
     const newMember = new MemberModel({
-      sispaId: sispaId.trim(), // Primary identifier - required
+      sispaId: normalizedSispaId, // Primary identifier - normalized to uppercase
       name: name.trim(),
-      email: email.trim(),
-      batch: batch.trim(),
+      email: normalizedEmail, // Normalized to lowercase
+      batch: normalizedBatch, // Normalized batch or null
       password: hashedPassword,
       role: 'member', // Always set to 'member' for public sign-ups
-      memberId: memberId ? memberId.trim() : null, // Optional - for backward compatibility
       matricNumber: matricNumber ? matricNumber.trim() : null,
       phoneNumber: null, // Not used in sign up
       profilePicture: profilePicture ? profilePicture.trim() : null,
+    });
+    
+    console.log('Creating new member:', {
+      sispaId: normalizedSispaId,
+      email: normalizedEmail,
+      batch: normalizedBatch
     });
 
     await newMember.save();
@@ -108,12 +169,40 @@ export const signUp = async (req: Request, res: Response) => {
       member: memberWithoutSensitive 
     });
   } catch (error: any) {
-    // Handle unique constraint errors
+    // Handle unique constraint errors (MongoDB duplicate key error)
     if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
+      const field = Object.keys(error.keyPattern || {})[0];
+      const duplicateValue = error.keyValue ? error.keyValue[field] : 'unknown';
+      
+      // Log the error for debugging
+      console.error('Duplicate key error during signup:', {
+        field,
+        duplicateValue,
+        keyPattern: error.keyPattern,
+        keyValue: error.keyValue
+      });
+      
+      // Special handling for memberId index (should not happen after migration)
+      if (field === 'memberId') {
+        console.error('⚠️  WARNING: memberId index still exists in database!');
+        console.error('⚠️  Please run: npm run drop-memberid-index');
+        return res.status(500).json({ 
+          success: false,
+          message: 'Database configuration error. Please contact administrator. The memberId index needs to be removed from the database.' 
+        });
+      }
+      
+      // Determine the correct error message based on the field
+      let fieldName = field;
+      if (field === 'email') {
+        fieldName = 'Email';
+      } else if (field === 'sispaId') {
+        fieldName = 'SISPA ID';
+      }
+      
       return res.status(400).json({ 
         success: false,
-        message: `${field === 'email' ? 'Email' : field === 'sispaId' ? 'SISPA ID' : field === 'memberId' ? 'Member ID' : field} already exists. Please use a different value.` 
+        message: `${fieldName} "${duplicateValue}" already exists. Please use a different ${fieldName === 'SISPA ID' ? 'SISPA ID' : fieldName === 'Email' ? 'email' : 'value'} or try logging in.` 
       });
     }
     // Handle validation errors
@@ -138,7 +227,7 @@ export const signUp = async (req: Request, res: Response) => {
 // ===============================
 export const addMember = async (req: Request, res: Response) => {
   try {
-    const { sispaId, name, email, batch, password, role, memberId, matricNumber, phoneNumber, profilePicture } = req.body;
+    const { sispaId, name, email, batch, password, role, matricNumber, phoneNumber, profilePicture } = req.body;
 
     // Validate required fields - sispaId is now required
     if (!sispaId || !name || !email || !batch || !password) {
@@ -148,17 +237,25 @@ export const addMember = async (req: Request, res: Response) => {
       });
     }
 
-    // Check if SISPA ID already exists
-    const existingSispaId = await MemberModel.findOne({ sispaId });
+    // Normalize inputs: SISPA ID to uppercase, email to lowercase
+    const normalizedSispaId = sispaId.trim().toUpperCase();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Check if SISPA ID already exists (case-insensitive check)
+    const existingSispaId = await MemberModel.findOne({ 
+      sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
     if (existingSispaId) {
       return res.status(400).json({ 
         success: false,
-        message: 'SISPA ID already exists. Please use a different SISPA ID.' 
+        message: `SISPA ID "${normalizedSispaId}" already exists. Please use a different SISPA ID.` 
       });
     }
 
-    // Check if email already exists
-    const existingEmail = await MemberModel.findOne({ email });
+    // Check if email already exists (case-insensitive check)
+    const existingEmail = await MemberModel.findOne({ 
+      email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
     if (existingEmail) {
       return res.status(400).json({ 
         success: false,
@@ -166,30 +263,21 @@ export const addMember = async (req: Request, res: Response) => {
       });
     }
 
-    // Check if memberId already exists (if provided - optional)
-    if (memberId) {
-      const existingMemberId = await MemberModel.findOne({ memberId });
-      if (existingMemberId) {
-        return res.status(400).json({ 
-          success: false,
-          message: 'Member ID already exists. Please use a different Member ID.' 
-        });
-      }
-    }
-
     // Hash password before saving
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    // Normalize batch if provided
+    const normalizedBatch = batch ? normalizeBatch(batch) : null;
+
     // Create new member with hashed password
     const newMember = new MemberModel({
-      sispaId: sispaId.trim(), // Primary identifier - required
+      sispaId: normalizedSispaId, // Primary identifier - normalized to uppercase
       name: name.trim(),
-      email: email.trim(),
-      batch: batch.trim(),
+      email: normalizedEmail, // Normalized to lowercase
+      batch: normalizedBatch, // Normalized batch or null
       password: hashedPassword,
       role: role || 'member',
-      memberId: memberId ? memberId.trim() : null, // Optional - for backward compatibility
       matricNumber: matricNumber ? matricNumber.trim() : null,
       phoneNumber: phoneNumber ? phoneNumber.trim() : null,
       profilePicture: profilePicture ? profilePicture.trim() : null,
@@ -212,7 +300,7 @@ export const addMember = async (req: Request, res: Response) => {
       const field = Object.keys(error.keyPattern)[0];
       return res.status(400).json({ 
         success: false,
-        message: `${field === 'email' ? 'Email' : field === 'sispaId' ? 'SISPA ID' : field === 'memberId' ? 'Member ID' : field} already exists. Please use a different value.` 
+        message: `${field === 'email' ? 'Email' : field === 'sispaId' ? 'SISPA ID' : field} already exists. Please use a different value.` 
       });
     }
     // Handle validation errors
@@ -236,20 +324,26 @@ export const addMember = async (req: Request, res: Response) => {
 export const updateMember = async (req: Request, res: Response) => {
   try {
     const { id } = req.params; // id is now sispaId
+    // Normalize sispaId to uppercase for query
+    const normalizedId = id.trim().toUpperCase();
     const { 
       name, 
       email, 
       batch, 
       password,
       role,
-      memberId, 
       matricNumber, 
       phoneNumber, 
       profilePicture 
     } = req.body;
 
-    // Check if member exists by sispaId
-    const existingMember = await MemberModel.findOne({ sispaId: id });
+    // Check if member exists by sispaId (try exact match first, then case-insensitive)
+    let existingMember = await MemberModel.findOne({ sispaId: normalizedId });
+    if (!existingMember) {
+      existingMember = await MemberModel.findOne({ 
+        sispaId: { $regex: new RegExp(`^${normalizedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
     if (!existingMember) {
       return res.status(404).json({ 
         success: false,
@@ -264,7 +358,7 @@ export const updateMember = async (req: Request, res: Response) => {
       updateData.name = name.trim();
     }
     if (email !== undefined && email !== null && email.trim() !== '') {
-      updateData.email = email.trim();
+      updateData.email = email.trim().toLowerCase(); // Normalize email to lowercase
     }
     if (batch !== undefined && batch !== null && batch.trim() !== '') {
       updateData.batch = batch.trim();
@@ -294,11 +388,11 @@ export const updateMember = async (req: Request, res: Response) => {
       });
     }
 
-    // Validate email uniqueness if email is being updated
+    // Validate email uniqueness if email is being updated (case-insensitive check)
     if (updateData.email) {
       const emailExists = await MemberModel.findOne({ 
-        email: updateData.email,
-        sispaId: { $ne: id }
+        email: { $regex: new RegExp(`^${updateData.email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+        sispaId: { $ne: normalizedId }
       });
       
       if (emailExists) {
@@ -309,23 +403,10 @@ export const updateMember = async (req: Request, res: Response) => {
       }
     }
 
-    // Check if memberId is being updated and if it conflicts with another user
-    if (updateData.memberId !== undefined && updateData.memberId !== null && updateData.memberId !== '') {
-      const memberIdExists = await MemberModel.findOne({ 
-        memberId: updateData.memberId,
-        sispaId: { $ne: id }
-      });
-      
-      if (memberIdExists) {
-        return res.status(400).json({ 
-          success: false,
-          message: 'Member ID already exists. Please use a different Member ID.' 
-        });
-      }
-    }
 
+    // Use normalized ID for update query
     const updatedMember = await MemberModel.findOneAndUpdate(
-      { sispaId: id },
+      { sispaId: normalizedId },
       updateData,
       { new: true, runValidators: true }
     ).select('-password -resetPasswordToken -resetPasswordExpires');
@@ -372,7 +453,15 @@ export const updateMember = async (req: Request, res: Response) => {
 export const deleteMember = async (req: Request, res: Response) => {
   try {
     const { id } = req.params; // id is now sispaId
-    const deletedMember = await MemberModel.findOneAndDelete({ sispaId: id });
+    // Normalize sispaId to uppercase for query
+    const normalizedId = id.trim().toUpperCase();
+    // Try exact match first, then case-insensitive
+    let deletedMember = await MemberModel.findOneAndDelete({ sispaId: normalizedId });
+    if (!deletedMember) {
+      deletedMember = await MemberModel.findOneAndDelete({ 
+        sispaId: { $regex: new RegExp(`^${normalizedId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
     if (!deletedMember) return res.status(404).json({ success: false, message: 'Member not found' });
     res.json({ success: true, message: 'Member deleted successfully', member: deletedMember });
   } catch (error) {
@@ -386,8 +475,15 @@ export const deleteMember = async (req: Request, res: Response) => {
 export const forgotPassword = async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
-
-    const member = await MemberModel.findOne({ email });
+    // Normalize email to lowercase
+    const normalizedEmail = email.trim().toLowerCase();
+    // Try exact match first, then case-insensitive search
+    let member = await MemberModel.findOne({ email: normalizedEmail });
+    if (!member) {
+      member = await MemberModel.findOne({ 
+        email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
     if (!member) return res.status(404).json({ message: "Email not found" });
 
     const token = crypto.randomBytes(32).toString("hex");
@@ -460,85 +556,64 @@ export const resetPassword = async (req: Request, res: Response) => {
 
 
 // ===============================
-// LOGIN CONTROLLER (Uses sispaId as primary, supports memberId for backward compatibility)
+// LOGIN CONTROLLER (Uses sispaId only)
 // ===============================
 export const loginMember = async (req: Request, res: Response) => {
   try {
-    const { sispaId, memberId, password } = req.body;
+    const { sispaId, password } = req.body;
 
     // Validate password is provided
     if (!password) {
-      return res.status(400).json({ success: false, message: "Password is required" });
+      return res.status(401).json({ success: false, message: "Invalid ID or Password" });
     }
 
-    // Validate at least one identifier is provided
-    if (!sispaId && !memberId) {
-      return res.status(400).json({ success: false, message: "Please provide sispaId or memberId" });
+    // Validate sispaId is provided
+    if (!sispaId) {
+      return res.status(401).json({ success: false, message: "Invalid ID or Password" });
     }
 
-    // Find member by sispaId (primary) or memberId (backward compatibility)
-    // Trim whitespace from input
-    let member;
-    if (sispaId) {
-      // Login with SISPA ID (primary method) - trim and search
-      const trimmedSispaId = sispaId.trim();
-      member = await MemberModel.findOne({ sispaId: trimmedSispaId });
-      
-      // If not found, try without trimming (in case database has extra spaces)
-      if (!member) {
-        member = await MemberModel.findOne({ sispaId: sispaId });
-      }
-    } else if (memberId) {
-      // Login with memberId (for backward compatibility) - trim and search
-      const trimmedMemberId = memberId.trim();
-      member = await MemberModel.findOne({ memberId: trimmedMemberId });
-      
-      // If not found, try without trimming
-      if (!member) {
-        member = await MemberModel.findOne({ memberId: memberId });
-      }
+    // Find member by sispaId - normalize to uppercase
+    const normalizedSispaId = sispaId.trim().toUpperCase();
+    // Try exact match first (most common case)
+    let member = await MemberModel.findOne({ sispaId: normalizedSispaId });
+    
+    // If not found, try case-insensitive search (for backward compatibility with existing data)
+    if (!member) {
+      member = await MemberModel.findOne({ 
+        sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
     }
 
     if (!member) {
-      console.log('Login attempt failed - User not found:', { sispaId, memberId });
-      return res.status(400).json({ success: false, message: "Invalid ID or Password" });
+      console.log('Login attempt failed - User not found:', { sispaId: normalizedSispaId });
+      return res.status(401).json({ success: false, message: "Invalid ID or Password" });
     }
 
     // Check if member has a password (should always be hashed)
     if (!member.password) {
-      console.error('Member found but has no password:', member.sispaId || member.memberId);
-      return res.status(400).json({ success: false, message: "Account error. Please contact administrator." });
+      console.error('Member found but has no password:', member.sispaId);
+      return res.status(401).json({ success: false, message: "Invalid ID or Password" });
     }
 
     // Compare password
     const isMatch = await bcrypt.compare(password.trim(), member.password);
     
     if (!isMatch) {
-      console.log('Login attempt failed - Password mismatch for:', member.sispaId || member.memberId);
-      return res.status(400).json({ success: false, message: "Invalid ID or Password" });
+      console.log('Login attempt failed - Password mismatch for:', member.sispaId);
+      return res.status(401).json({ success: false, message: "Invalid ID or Password" });
     }
 
-    // Check if member has sispaId (required for new system)
-    if (!member.sispaId) {
-      console.warn('Member logged in without sispaId:', member.memberId);
-      return res.status(400).json({ 
-        success: false, 
-        message: "Account needs to be updated. Please contact administrator." 
-      });
-    }
-
-    // Generate JWT token - sispaId is now primary
+    // Generate JWT token - sispaId only
     const token = jwt.sign(
       {
         sispaId: member.sispaId, // Primary identifier
         role: member.role,
-        memberId: member.memberId, // Optional - for backward compatibility
       },
       JWT_SECRET,
       { expiresIn: '7d' } // Token expires in 7 days
     );
 
-    console.log('Login successful for:', member.sispaId || member.memberId);
+    console.log('Login successful for:', member.sispaId);
     console.log('Login response data:', {
       sispaId: member.sispaId,
       name: member.name,
@@ -549,22 +624,26 @@ export const loginMember = async (req: Request, res: Response) => {
       profilePicture: member.profilePicture
     });
 
-    // Success - Return ALL profile data
+    // Success - Return ALL profile data matching frontend spec
+    // Admin should have empty batch string as per frontend spec
+    const userBatch = member.role === 'admin' ? "" : (normalizeBatchForResponse(member.batch) || "");
+    const memberDoc = member as any; // Type assertion for mongoose document
+    
     res.json({
       success: true,
-      message: "Login successful",
-      token,
-      member: {
+      user: {
+        id: String(memberDoc._id),
         sispaId: member.sispaId,
         name: member.name,
         email: member.email,
-        batch: member.batch,
         role: member.role,
-        memberId: member.memberId,
+        batch: userBatch, // Normalized batch format
+        gender: member.gender || null, // Include gender field
         matricNumber: member.matricNumber || null,
         phoneNumber: member.phoneNumber || null,
         profilePicture: member.profilePicture || null
-      }
+      },
+      token
     });
 
   } catch (error: any) {
@@ -585,13 +664,7 @@ export const getOwnProfile = async (req: AuthRequest, res: Response) => {
     console.log('Getting profile for sispaId:', req.user.sispaId);
     
     // Find member by sispaId (primary identifier)
-    let member = await MemberModel.findOne({ sispaId: req.user.sispaId }).select('-password -resetPasswordToken -resetPasswordExpires');
-    
-    // Fallback to memberId for backward compatibility
-    if (!member && req.user.memberId) {
-      console.log('Member not found by sispaId, trying memberId:', req.user.memberId);
-      member = await MemberModel.findOne({ memberId: req.user.memberId }).select('-password -resetPasswordToken -resetPasswordExpires');
-    }
+    const member = await MemberModel.findOne({ sispaId: req.user.sispaId }).select('-password -resetPasswordToken -resetPasswordExpires');
     
     if (!member) {
       console.error('Member not found with sispaId:', req.user.sispaId);
@@ -602,14 +675,30 @@ export const getOwnProfile = async (req: AuthRequest, res: Response) => {
       name: member.name,
       email: member.email,
       batch: member.batch,
+      gender: member.gender,
       matricNumber: member.matricNumber,
       phoneNumber: member.phoneNumber,
       profilePicture: member.profilePicture
     });
 
+    // Explicitly return member with all fields including gender
+    const memberDoc = member as any;
     res.json({
       success: true,
-      member
+      member: {
+        id: String(memberDoc._id),
+        sispaId: member.sispaId,
+        name: member.name,
+        email: member.email,
+        batch: member.batch,
+        role: member.role,
+        gender: member.gender || null, // Explicitly include gender
+        matricNumber: member.matricNumber || null,
+        phoneNumber: member.phoneNumber || null,
+        profilePicture: member.profilePicture || null,
+        createdAt: memberDoc.createdAt,
+        updatedAt: memberDoc.updatedAt
+      }
     });
   } catch (error: any) {
     console.error('Error fetching profile:', error);
@@ -632,7 +721,7 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
     }
 
     // Check if user has sispaId (required for lookup)
-    if (!req.user.sispaId && !req.user.memberId) {
+    if (!req.user.sispaId) {
       return res.status(401).json({ 
         success: false, 
         message: "Invalid user token. Please log in again." 
@@ -644,7 +733,7 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
       name, 
       email, 
       batch, 
-      memberId, 
+      gender,
       matricNumber, 
       phoneNumber,
       profilePicture
@@ -669,24 +758,37 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
     if (email !== undefined && email !== null) {
       const trimmedEmail = safeTrim(email);
       if (trimmedEmail && trimmedEmail !== '') {
-        updateData.email = trimmedEmail;
+        updateData.email = trimmedEmail.toLowerCase(); // Normalize email to lowercase
       }
     }
-    // Batch can be updated (required field, so must not be empty)
-    if (batch !== undefined && batch !== null) {
-      const trimmedBatch = safeTrim(batch);
-      if (!trimmedBatch || trimmedBatch === '') {
+    // Batch can be updated (optional field, normalize if provided)
+    if (batch !== undefined) {
+      if (batch === null || batch === '') {
+        updateData.batch = null; // Allow clearing batch
+      } else {
+        const normalizedBatch = normalizeBatch(batch);
+        if (normalizedBatch) {
+          updateData.batch = normalizedBatch;
+        } else {
+          // If normalization fails (no number found), return null
+          updateData.batch = null;
+        }
+      }
+    }
+    // Gender field - validate and update if provided
+    if (gender !== undefined) {
+      if (gender === null || gender === '') {
+        updateData.gender = null;
+      } else if (gender === 'Male' || gender === 'Female') {
+        updateData.gender = gender;
+      } else {
         return res.status(400).json({ 
           success: false, 
-          message: "Batch is required and cannot be empty" 
+          message: 'Gender must be "Male" or "Female"'
         });
       }
-      updateData.batch = trimmedBatch;
     }
-    // memberId can be updated (optional field)
-    if (memberId !== undefined) {
-      updateData.memberId = memberId === '' || memberId === null ? null : safeTrim(memberId);
-    }
+
     // Optional fields - update if provided (even if empty string, set to null)
     if (matricNumber !== undefined) {
       if (matricNumber === '' || matricNumber === null) {
@@ -721,15 +823,13 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Validate email uniqueness if email is being updated
+    // Validate email uniqueness if email is being updated (case-insensitive check)
     if (updateData.email) {
       // Build query to exclude current user
-      const excludeQuery: any = { email: updateData.email };
-      if (req.user.sispaId) {
-        excludeQuery.sispaId = { $ne: req.user.sispaId };
-      } else if (req.user.memberId) {
-        excludeQuery.memberId = { $ne: req.user.memberId };
-      }
+      const excludeQuery: any = { 
+        email: { $regex: new RegExp(`^${updateData.email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+        sispaId: { $ne: req.user.sispaId }
+      };
       
       const existingEmail = await MemberModel.findOne(excludeQuery);
       
@@ -741,42 +841,12 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Check if memberId is being updated and if it conflicts with another user
-    if (updateData.memberId !== undefined && updateData.memberId !== null && updateData.memberId !== '') {
-      // Build query to exclude current user
-      const excludeQuery: any = { memberId: updateData.memberId };
-      if (req.user.sispaId) {
-        excludeQuery.sispaId = { $ne: req.user.sispaId };
-      } else if (req.user.memberId) {
-        excludeQuery.memberId = { $ne: req.user.memberId };
-      }
-      
-      const existingMember = await MemberModel.findOne(excludeQuery);
-      
-      if (existingMember) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "Member ID already exists. Please use a different Member ID." 
-        });
-      }
-    }
-
-    console.log('Updating profile for sispaId:', req.user.sispaId, 'memberId:', req.user.memberId);
+    console.log('Updating profile for sispaId:', req.user.sispaId);
     console.log('Raw request body:', JSON.stringify(req.body, null, 2));
     console.log('Update data being saved:', JSON.stringify(updateData, null, 2));
     
-    // Find member by sispaId (primary identifier) or memberId (fallback)
-    let query: any = {};
-    if (req.user.sispaId) {
-      query = { sispaId: req.user.sispaId };
-    } else if (req.user.memberId) {
-      query = { memberId: req.user.memberId };
-    } else {
-      return res.status(401).json({ 
-        success: false, 
-        message: "Invalid user token. Please log in again." 
-      });
-    }
+    // Find member by sispaId (primary identifier)
+    const query = { sispaId: req.user.sispaId };
     
     // Get current member data before update for logging
     const currentMember = await MemberModel.findOne(query);
@@ -818,10 +888,27 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
       profilePicture: verifiedMember?.profilePicture
     });
 
+    // Format response with normalized batch
+    const responseMember = verifiedMember || updatedMember;
+    const memberDoc = responseMember as any;
+
     res.json({
       success: true,
       message: "Profile updated successfully",
-      member: verifiedMember || updatedMember
+      member: {
+        id: String(memberDoc._id),
+        sispaId: responseMember.sispaId,
+        name: responseMember.name,
+        email: responseMember.email,
+        batch: normalizeBatchForResponse(responseMember.batch) || "",
+        role: responseMember.role,
+        gender: responseMember.gender || null,
+        matricNumber: responseMember.matricNumber || null,
+        phoneNumber: responseMember.phoneNumber || null,
+        profilePicture: responseMember.profilePicture || null,
+        createdAt: memberDoc.createdAt,
+        updatedAt: memberDoc.updatedAt
+      }
     });
   } catch (error: any) {
     console.error('Profile update error:', error);
@@ -829,7 +916,7 @@ export const updateOwnProfile = async (req: AuthRequest, res: Response) => {
     // Handle unique constraint errors
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern || {})[0];
-      const fieldName = field === 'email' ? 'Email' : field === 'sispaId' ? 'SISPA ID' : field === 'memberId' ? 'Member ID' : field;
+      const fieldName = field === 'email' ? 'Email' : field === 'sispaId' ? 'SISPA ID' : field;
       return res.status(400).json({ 
         success: false, 
         message: `${fieldName} already exists. Please use a different value.` 

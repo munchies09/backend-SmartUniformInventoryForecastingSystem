@@ -15,7 +15,8 @@ import { getUserDashboard } from "../controllers/dashboardController";
 import { 
   getMemberUniform, 
   createMemberUniform, 
-  updateMemberUniform 
+  updateMemberUniform,
+  getMemberUniformBySispaId
 } from "../controllers/uniformController";
 import { authenticate, authorizeAdmin } from "../middleware/auth";
 
@@ -27,7 +28,7 @@ const router = express.Router();
 // Sign up / Register new account
 router.post("/signup", signUp);
 
-// Login (supports both memberId and sispaId)
+// Login (uses sispaId)
 router.post("/login", loginMember);
 
 // Forgot password
@@ -63,6 +64,10 @@ router.put("/uniform", authenticate, updateMemberUniform);
 // Member CRUD - Admin only
 router.get("/", authenticate, authorizeAdmin, getMembers);
 router.post("/add", authenticate, authorizeAdmin, addMember);
+
+// Get member uniform by sispaId (admin only) - MUST be before /:id route to avoid conflicts
+router.get("/:sispaId/uniform", authenticate, authorizeAdmin, getMemberUniformBySispaId);
+
 router.put("/:id", authenticate, authorizeAdmin, updateMember);
 router.delete("/:id", authenticate, authorizeAdmin, deleteMember);
 

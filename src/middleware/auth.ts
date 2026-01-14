@@ -6,7 +6,6 @@ export interface AuthRequest extends Request {
   user?: {
     sispaId: string; // Primary identifier
     role: 'admin' | 'member';
-    memberId?: string; // Optional - for backward compatibility
   };
 }
 
@@ -24,7 +23,6 @@ export const authenticate = (req: AuthRequest, res: Response, next: NextFunction
     const decoded = jwt.verify(token, JWT_SECRET) as {
       sispaId: string; // Primary identifier
       role: 'admin' | 'member';
-      memberId?: string; // Optional - for backward compatibility
     };
 
     req.user = decoded;

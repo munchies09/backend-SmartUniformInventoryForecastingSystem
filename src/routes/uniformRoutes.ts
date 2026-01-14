@@ -4,21 +4,33 @@ import {
   addUniform, 
   updateUniform, 
   deleteUniform,
+  deleteUniformByAttributes,
+  deleteUniformByType,
   getOwnUniform,
   addOwnUniform,
   updateOwnUniform,
   addUniformItem,
-  deleteUniformItem
+  deleteUniformItem,
+  deductInventory,
+  getSizeCharts,
+  getShirtPrices,
+  updateShirtPrice
 } from '../controllers/uniformController';
 import { authenticate, authorizeAdmin } from '../middleware/auth';
 
 const router = express.Router();
 
 // ===============================
+// INVENTORY DEDUCTION (Member or Admin)
+// ===============================
+// Deduct inventory when users save uniforms
+router.post('/deduct', authenticate, deductInventory);
+
+// ===============================
 // ADMIN ROUTES (Admin only - Inventory Management)
 // ===============================
-// Get all uniforms (inventory)
-router.get('/', authenticate, authorizeAdmin, getUniforms);
+// Get all uniforms (inventory) - Now accessible to all authenticated users (for user uniform UI)
+router.get('/', authenticate, getUniforms);
 
 // Add uniform to inventory
 router.post('/', authenticate, authorizeAdmin, addUniform);
@@ -26,8 +38,29 @@ router.post('/', authenticate, authorizeAdmin, addUniform);
 // Update uniform in inventory
 router.put('/:id', authenticate, authorizeAdmin, updateUniform);
 
-// Delete uniform from inventory
+// Delete uniform from inventory (by ID)
 router.delete('/:id', authenticate, authorizeAdmin, deleteUniform);
+
+// Delete uniform from inventory (by category, type, size - alternative method)
+router.delete('/by-attributes', authenticate, authorizeAdmin, deleteUniformByAttributes);
+
+// Delete all inventory items for a specific type
+router.delete('/type/:category/:type', authenticate, authorizeAdmin, deleteUniformByType);
+
+// ===============================
+// SIZE CHART MANAGEMENT
+// ===============================
+// Get all size charts (accessible by both members and admins)
+router.get('/size-charts', authenticate, getSizeCharts);
+
+// ===============================
+// SHIRT PRICE MANAGEMENT
+// ===============================
+// Get shirt prices (accessible by both members and admins)
+router.get('/shirt-prices', authenticate, getShirtPrices);
+
+// Update shirt price (Admin only)
+router.put('/shirt-prices', authenticate, authorizeAdmin, updateShirtPrice);
 
 // ===============================
 // MEMBER ROUTES (Authenticated members - Own uniform)

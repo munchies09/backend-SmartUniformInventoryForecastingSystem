@@ -15,15 +15,8 @@ export const getUserDashboard = async (req: AuthRequest, res: Response) => {
     console.log('Getting dashboard for sispaId:', req.user.sispaId);
     
     // Find member by sispaId (primary identifier)
-    let member = await MemberModel.findOne({ sispaId: req.user.sispaId })
+    const member = await MemberModel.findOne({ sispaId: req.user.sispaId })
       .select('-password -resetPasswordToken -resetPasswordExpires');
-
-    // Fallback to memberId for backward compatibility
-    if (!member && req.user.memberId) {
-      console.log('Member not found by sispaId, trying memberId:', req.user.memberId);
-      member = await MemberModel.findOne({ memberId: req.user.memberId })
-        .select('-password -resetPasswordToken -resetPasswordExpires');
-    }
 
     if (!member) {
       console.error('Member not found with sispaId:', req.user.sispaId);
@@ -34,7 +27,7 @@ export const getUserDashboard = async (req: AuthRequest, res: Response) => {
     const announcements = await AnnouncementModel.find()
       .sort({ createdAt: -1 })
       .limit(5)
-      .select('title content createdAt');
+      .select('title date time location message createdAt');
 
     // Check if user has uniform (using sispaId)
     const userUniform = await MemberUniform.findOne({ sispaId: req.user.sispaId });
@@ -48,7 +41,6 @@ export const getUserDashboard = async (req: AuthRequest, res: Response) => {
         email: member.email,
         batch: member.batch,
         role: member.role,
-        memberId: member.memberId,
         matricNumber: member.matricNumber,
         phoneNumber: member.phoneNumber,
         profilePicture: member.profilePicture

@@ -4,7 +4,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon src/server.ts"
+    "dev": "nodemon src/server.ts",
+    "create-admin": "ts-node scripts/createAdmin.ts",
+    "export-ml-data": "ts-node scripts/exportDataForML.ts",
+    "drop-memberid-index": "ts-node scripts/dropMemberIdIndex.ts",
+    "add-inventory-status": "ts-node scripts/addStatusToInventory.ts",
+    "migrate-database": "ts-node scripts/migrateDatabaseSchema.ts",
+    "migrate-uniform-no3-types": "ts-node scripts/migrateUniformNo3Types.ts",
+    "migrate-uniform-no4-types": "ts-node scripts/migrateUniformNo4Types.ts",
+    "migrate-gold-to-shoulder-badge": "ts-node scripts/migrateGoldToShoulderBadge.ts",
+    "rollback-shoulder-to-gold-badge": "ts-node scripts/migrateGoldToShoulderBadge.ts rollback",
+    "check-uniform": "ts-node scripts/checkMemberUniform.ts",
+    "migrate-to-5-category": "ts-node scripts/migrateTo5CategoryStructure.ts",
+    "add-image-sizechart-fields": "ts-node scripts/addImageAndSizeChartFields.ts"
   },
   "keywords": [],
   "author": "",
@@ -14,6 +26,7 @@
     "bcryptjs": "^3.0.3",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
