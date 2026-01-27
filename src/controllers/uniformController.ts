@@ -490,6 +490,7 @@ function normalizeTypeForMatching(type: string): string {
   // Uniform No 4 (merged - cloth and pants come as a pair):
   // "Cloth No 4" → "Uniform No 4"
   // "Pants No 4" or "Pant No 4" → "Uniform No 4"
+  // "Uniform No 4" → "Uniform No 4" (direct match)
   if (trimmed.toLowerCase() === 'cloth no 4' || trimmed.toLowerCase() === 'cloth no. 4') {
     return 'uniform no 4';
   }
@@ -497,28 +498,110 @@ function normalizeTypeForMatching(type: string): string {
       trimmed.toLowerCase() === 'pant no 4' || trimmed.toLowerCase() === 'pant no. 4') {
     return 'uniform no 4';
   }
+  // CRITICAL FIX: Handle "Uniform No 4" directly (same as Uniform No 3 Male/Female)
+  if (trimmed.toLowerCase() === 'uniform no 4' || trimmed.toLowerCase() === 'uniform no. 4') {
+    return 'uniform no 4';
+  }
+  
+  // Uniform No 3 types (for consistency):
+  // "Uniform No 3 Male" → "uniform no 3 male"
+  // "Uniform No 3 Female" → "uniform no 3 female"
+  if (trimmed.toLowerCase() === 'uniform no 3 male' || trimmed.toLowerCase() === 'uniform no. 3 male') {
+    return 'uniform no 3 male';
+  }
+  if (trimmed.toLowerCase() === 'uniform no 3 female' || trimmed.toLowerCase() === 'uniform no. 3 female') {
+    return 'uniform no 3 female';
+  }
   
   // Gold Badge → Shoulder Badge (backward compatibility)
   if (trimmed.toLowerCase() === 'gold badge') {
     return 'shoulder badge';
   }
   
+  // CRITICAL: Before general normalization, check if this is already a normalized type
+  // "Uniform No 3 Male", "Uniform No 3 Female", "Uniform No 4" should stay as-is
+  const trimmedLower = trimmed.toLowerCase();
+  if (trimmedLower === 'uniform no 3 male' || trimmedLower === 'uniform no. 3 male') {
+    return 'uniform no 3 male';
+  }
+  if (trimmedLower === 'uniform no 3 female' || trimmedLower === 'uniform no. 3 female') {
+    return 'uniform no 3 female';
+  }
+  if (trimmedLower === 'uniform no 4' || trimmedLower === 'uniform no. 4') {
+    return 'uniform no 4';
+  }
+  
   // Remove common suffixes and normalize
+  // CRITICAL: Don't remove "No 3" or "No 4" if it's part of a normalized type name
+  // Only remove suffixes for items that need normalization (like "Digital Shirt" → "digital")
   return trimmed
     .toLowerCase()
-    .replace(/\s*shirt\s*/gi, '') // Remove "Shirt" or "shirt"
-    .replace(/\s*no\s*\d+\s*/gi, '') // Remove "No 3", "no 3", etc.
+    .replace(/\s*shirt\s*/gi, '') // Remove "Shirt" or "shirt" (but keep "Uniform No 3 Male")
     .replace(/\s+/g, ' ') // Normalize spaces
     .trim();
 }
 
 // Helper function to format uniform items with status fields
 // CRITICAL: Normalizes categories in response to ensure 5-category structure
-function formatUniformItemsWithStatus(
+async function formatUniformItemsWithStatus(
   items: any[],
   uniformCreatedAt: Date,
   uniformUpdatedAt: Date
-): any[] {
+): Promise<any[]> {
+  // CRITICAL: Fetch shirt prices from UniformInventory (not from ShirtPrice collection)
+  // Prices are stored directly in UniformInventory when admin sets them
+  // Get unique shirt items (category + type) from user uniform
+  const shirtItems = items.filter(item => {
+    const category = item.category?.toLowerCase() || '';
+    return category === 'shirt' || category === 't-shirt';
+  });
+  
+  let shirtPricesMap: Map<string, number | null> = new Map();
+  if (shirtItems.length > 0) {
+    try {
+      // Get unique shirt types
+      const shirtTypes = [...new Set(shirtItems.map(item => item.type).filter(Boolean))];
+      
+      // Fetch prices from UniformInventory (any size will have the same price for that type)
+      // Since price is stored per type (same for all sizes), we just need to find one item of each type
+      for (const shirtType of shirtTypes) {
+        // Use case-insensitive matching for category and exact match for type
+        const inventoryItem = await UniformInventory.findOne({
+          $or: [
+            { category: { $regex: /^shirt$/i }, type: shirtType },
+            { category: { $regex: /^t-shirt$/i }, type: shirtType },
+            { category: 'Shirt', type: shirtType },
+            { category: 'T-Shirt', type: shirtType }
+          ]
+        })
+        .sort({ price: -1, updatedAt: -1 })
+        .select('category type price')
+        .lean();
+        
+        if (inventoryItem) {
+          const normalizedType = (shirtType || '').toLowerCase();
+          const priceValue = inventoryItem.price !== null && inventoryItem.price !== undefined ? inventoryItem.price : null;
+          shirtPricesMap.set(normalizedType, priceValue);
+          if (priceValue !== null) {
+            console.log(`💰 Fetched price for shirt "${shirtType}" (category: "${inventoryItem.category}") from UniformInventory: RM ${priceValue}`);
+          } else {
+            console.warn(`⚠️  Inventory item found for "${shirtType}" but price is missing (null/undefined). Admin needs to set price in inventory.`);
+          }
+        } else {
+          console.warn(`⚠️  No inventory item found for shirt type: "${shirtType}". Make sure this shirt type exists in inventory.`);
+        }
+      }
+      
+      if (shirtPricesMap.size > 0) {
+        console.log(`💰 Fetched ${shirtPricesMap.size} shirt prices from UniformInventory:`, 
+          Array.from(shirtPricesMap.entries()).map(([type, price]) => `${type}=${price !== null && price !== undefined ? `RM ${price}` : 'null'}`).join(', '));
+      }
+    } catch (priceError: any) {
+      console.warn(`⚠️  Error fetching shirt prices from UniformInventory:`, priceError.message);
+      // Continue without prices if fetch fails
+    }
+  }
+  
   return items.map((item: any) => {
     try {
       // Ensure item has required fields before normalizing
@@ -546,6 +629,23 @@ function formatUniformItemsWithStatus(
         quantity: item.quantity !== undefined && item.quantity !== null ? Number(item.quantity) : 1,
         notes: item.notes || null
       };
+      
+      // CRITICAL: Fetch and include price for shirt items
+      // Prices are stored directly in UniformInventory (set by admin in inventory management)
+      if (normalizedCategory?.toLowerCase() === 'shirt' || normalizedCategory?.toLowerCase() === 't-shirt') {
+        const shirtType = (normalizedType || item.type)?.toLowerCase() || '';
+        const price = shirtPricesMap.get(shirtType);
+        if (price !== undefined) {
+          itemData.price = price; // Include price (can be null if not set)
+          if (price !== null && price !== undefined) {
+            console.log(`💰 Added price for shirt: ${normalizedType || item.type} = RM ${price} (from UniformInventory)`);
+          }
+        } else {
+          // Price not found in UniformInventory - default to null
+          itemData.price = null;
+          console.log(`⚠️  Price not found for shirt: ${normalizedType || item.type} - Admin needs to set price in inventory`);
+        }
+      }
 
       // Add status fields if they exist in the item, otherwise calculate default
       if (item.status !== undefined && item.status !== null) {
@@ -554,14 +654,30 @@ function formatUniformItemsWithStatus(
         
         // Include missingCount if status is "Missing"
         // CRITICAL: Always include missingCount when status is "Missing" (for frontend display)
+        // Also include missingCount when status is "Available" if it exists (for debugging/verification)
         if (item.status === 'Missing') {
-          if (item.missingCount !== undefined && item.missingCount !== null && Number(item.missingCount) > 0) {
-            itemData.missingCount = Number(item.missingCount);
+          // CRITICAL: Check item.missingCount - it might be stored as number, string, or undefined
+          const itemMissingCount = item.missingCount !== undefined && item.missingCount !== null 
+            ? Number(item.missingCount) 
+            : null;
+          
+          // CRITICAL: Include the actual database value, even if it's 0
+          // The backend will increment it on the next save, so we need to show the actual value
+          // If we default to 1 here, the frontend thinks it's 1 but DB has 0, causing confusion
+          if (itemMissingCount !== null) {
+            itemData.missingCount = itemMissingCount;
+            console.log(`✅ Including missingCount for ${item.type}: ${itemMissingCount} (from database, raw: ${JSON.stringify(item.missingCount)})`);
           } else {
-            // If status is Missing but missingCount is not set or is 0, default to 1 (first time marked as Missing)
+            // Only default to 1 if the field doesn't exist at all (null/undefined)
+            // This means it was never set, so backend will set it to 1 on next save
             itemData.missingCount = 1;
-            console.log(`⚠️  Item ${item.type} has status "Missing" but missingCount is ${item.missingCount || 'not set'} - defaulting to 1`);
+            console.log(`⚠️  Item ${item.type} has status "Missing" but missingCount is not set (null/undefined) - defaulting to 1 for display`);
           }
+        } else if (item.missingCount !== undefined && item.missingCount !== null && Number(item.missingCount) > 0) {
+          // Include missingCount even when status is not "Missing" (for debugging - shows preserved count)
+          // This helps verify that missingCount is being preserved correctly
+          itemData.missingCount = Number(item.missingCount);
+          console.log(`📋 Item ${item.type} has status "${item.status}" but missingCount is preserved: ${item.missingCount}`);
         }
         
         // Include receivedDate if status is "Available"
@@ -599,8 +715,52 @@ function formatUniformItemsWithStatus(
   }).filter(item => item !== null); // Remove any null items from formatting errors
 }
 
+// Helper function to map frontend type names to possible inventory type names
+// Frontend sends "Uniform No 3 Female" and "Uniform No 4", but inventory may store "Pants No 3"/"Cloth No 3" and "Cloth No 4"/"Pants No 4"
+function getInventoryTypeVariations(category: string, type: string): string[] {
+  const typeLower = (type || '').toLowerCase().trim();
+  const categoryLower = (category || '').toLowerCase().trim();
+  
+  const variations: string[] = [type]; // Always include original type
+  
+  // Uniform No 3 Female → search for "Pants No 3" and "Cloth No 3"
+  if (typeLower === 'uniform no 3 female' || typeLower === 'uniform no. 3 female') {
+    variations.push('Pants No 3', 'Pants No. 3', 'pants no 3', 'pants no. 3');
+  }
+  
+  // Uniform No 3 Male → search for "Cloth No 3" and "Pants No 3" (though typically Cloth)
+  if (typeLower === 'uniform no 3 male' || typeLower === 'uniform no. 3 male') {
+    variations.push('Cloth No 3', 'Cloth No. 3', 'cloth no 3', 'cloth no. 3');
+  }
+  
+  // Uniform No 4 → search for "Cloth No 4", "Pants No 4", "Uniform No 4"
+  if (typeLower === 'uniform no 4' || typeLower === 'uniform no. 4') {
+    variations.push('Cloth No 4', 'Cloth No. 4', 'Pants No 4', 'Pants No. 4', 'Pant No 4', 'Pant No. 4');
+    variations.push('cloth no 4', 'cloth no. 4', 'pants no 4', 'pants no. 4', 'pant no 4', 'pant no. 4');
+  }
+  
+  // Also handle reverse mapping: if inventory has old names, map to new names
+  if (typeLower === 'pants no 3' || typeLower === 'pants no. 3') {
+    variations.push('Uniform No 3 Female', 'Uniform No. 3 Female', 'uniform no 3 female', 'uniform no. 3 female');
+  }
+  
+  if (typeLower === 'cloth no 3' || typeLower === 'cloth no. 3') {
+    variations.push('Uniform No 3 Male', 'Uniform No. 3 Male', 'uniform no 3 male', 'uniform no. 3 male');
+  }
+  
+  if (typeLower === 'cloth no 4' || typeLower === 'cloth no. 4' || 
+      typeLower === 'pants no 4' || typeLower === 'pants no. 4' ||
+      typeLower === 'pant no 4' || typeLower === 'pant no. 4') {
+    variations.push('Uniform No 4', 'Uniform No. 4', 'uniform no 4', 'uniform no. 4');
+  }
+  
+  // Remove duplicates
+  return [...new Set(variations)];
+}
+
 // Helper function to find inventory item with case-insensitive and flexible matching
 // CRITICAL: Normalizes category before searching to support 5-category structure
+// CRITICAL: Maps frontend type names ("Uniform No 3 Female", "Uniform No 4") to inventory type names ("Pants No 3", "Cloth No 4")
 async function findInventoryItem(
   category: string, 
   type: string, 
@@ -617,9 +777,14 @@ async function findInventoryItem(
   // This ensures accessories are searched in the correct category (Accessories No 3/4, not Uniform No 3/4)
   const normalizedType = normalizeTypeName(category, type);
   const normalizedCategory = normalizeCategoryForStorage(category, normalizedType);
-  
-  const normalizedSize = normalizeSize(size);
   const normalizedTypeForMatching = normalizeTypeForMatching(normalizedType);
+  
+  // CRITICAL: Size normalization depends on item type
+  // - Beret: Do NOT normalize (will use EXACT match later)
+  // - PVC Shoes/Boot: Will normalize UK prefix later
+  // - Other items: Normalize for flexible matching
+  const isBeret = normalizedType.toLowerCase() === 'beret';
+  const normalizedSize = isBeret ? (size ? String(size).trim() : null) : normalizeSize(size);
   
   // Build query for category - try both normalized and original category for backward compatibility
   // Some items in database might still have old categories, so we search both
@@ -630,25 +795,38 @@ async function findInventoryItem(
     ]
   };
   
+  // CRITICAL: Get all type variations to search for (maps frontend names to inventory names)
+  const typeVariations = getInventoryTypeVariations(category, type);
+  
   // Add debug logging
-  console.log('Searching for inventory item:', {
+  console.log('🔍 findInventoryItem called:', {
     originalCategory: category,
-    normalizedCategory: normalizedCategory,
     originalType: type,
+    originalSize: size || 'EMPTY/NULL',
+    normalizedCategory: normalizedCategory,
     normalizedType: normalizedType,
     normalizedTypeForMatching: normalizedTypeForMatching,
-    originalSize: size,
-    normalizedSize: normalizedSize
+    normalizedSize: normalizedSize,
+    typeVariations: typeVariations // Show all variations being searched
   });
   
   // Fetch all items matching category (try both normalized and original), then filter by type and size in memory
   // This allows flexible type matching (handles "Digital Shirt" vs "Digital" etc.)
   // And handles backward compatibility with old category names
+  // OPTIMIZATION: Add limit to prevent loading too many items
+  const MAX_ITEMS_TO_SEARCH = 500; // Reasonable limit for category search
   let allItems;
   if (session) {
-    allItems = await UniformInventory.find(categoryQuery).session(session);
+    allItems = await UniformInventory.find(categoryQuery)
+      .limit(MAX_ITEMS_TO_SEARCH)
+      .select('category type size quantity')
+      .lean()
+      .session(session);
   } else {
-    allItems = await UniformInventory.find(categoryQuery);
+    allItems = await UniformInventory.find(categoryQuery)
+      .limit(MAX_ITEMS_TO_SEARCH)
+      .select('category type size quantity')
+      .lean();
   }
   
   if (allItems.length === 0) {
@@ -658,9 +836,11 @@ async function findInventoryItem(
   
   console.log(`Found ${allItems.length} items matching category. Checking type and size...`);
   console.log('Available types:', [...new Set(allItems.map(item => item.type))]);
+  console.log(`🔍 Type variations to search for:`, typeVariations);
   
   // First filter by type with flexible matching
   // Use normalizedType (already normalized) for matching, but also try original type for backward compatibility
+  // CRITICAL: Also search for all type variations (frontend names → inventory names)
   const typeMatchedItems = allItems.filter(item => {
     // Normalize item type from database (might have old type names)
     const itemNormalizedType = normalizeTypeName(item.category, item.type);
@@ -671,13 +851,23 @@ async function findInventoryItem(
     if (itemNormalizedTypeForMatching === searchNormalizedTypeForMatching) return true;
     if (normalizeTypeForMatching(item.type) === searchNormalizedTypeForMatching) return true;
     
-    // Strategy 2: One contains the other (handles "Digital Shirt" matching "Digital")
+    // Strategy 2: Match against all type variations (CRITICAL for frontend/inventory name mapping)
+    for (const variation of typeVariations) {
+      const variationNormalized = normalizeTypeForMatching(variation);
+      if (itemNormalizedTypeForMatching === variationNormalized) return true;
+      if (normalizeTypeForMatching(item.type) === variationNormalized) return true;
+      
+      // Case-insensitive direct match
+      if (item.type.toLowerCase() === variation.toLowerCase()) return true;
+    }
+    
+    // Strategy 3: One contains the other (handles "Digital Shirt" matching "Digital")
     if (itemNormalizedTypeForMatching.includes(searchNormalizedTypeForMatching) || 
         searchNormalizedTypeForMatching.includes(itemNormalizedTypeForMatching)) {
       return true;
     }
     
-    // Strategy 3: Case-insensitive regex match (original types)
+    // Strategy 4: Case-insensitive regex match (original types)
     const itemTypeLower = item.type.toLowerCase();
     const searchTypeLower = normalizedType.toLowerCase(); // Use normalized type
     const originalTypeLower = type.toLowerCase(); // Also try original type
@@ -685,7 +875,7 @@ async function findInventoryItem(
     if (itemTypeLower.includes(searchTypeLower) || searchTypeLower.includes(itemTypeLower)) return true;
     if (itemTypeLower.includes(originalTypeLower) || originalTypeLower.includes(itemTypeLower)) return true;
     
-    // Strategy 4: Match normalized type names directly
+    // Strategy 5: Match normalized type names directly
     const itemNormalizedDirect = normalizeTypeForMatching(item.type);
     if (itemNormalizedDirect === normalizedTypeForMatching) return true;
     
@@ -694,30 +884,138 @@ async function findInventoryItem(
   
   if (typeMatchedItems.length === 0) {
     console.log('❌ No matching type found. Available types:', [...new Set(allItems.map(item => item.type))]);
+    console.log('❌ Type matching failed - search details:', {
+      searchedType: type,
+      normalizedType: normalizedType,
+      normalizedTypeForMatching: normalizedTypeForMatching,
+      availableTypes: [...new Set(allItems.map(item => item.type))],
+      availableNormalizedTypes: [...new Set(allItems.map(item => {
+        const itemNormType = normalizeTypeName(item.category, item.type);
+        return normalizeTypeForMatching(itemNormType);
+      }))]
+    });
     return null;
   }
   
-  console.log(`Found ${typeMatchedItems.length} items matching type. Checking sizes...`);
-  console.log('Available sizes for matched type:', typeMatchedItems.map(item => item.size));
+  console.log(`✅ Found ${typeMatchedItems.length} items matching type. Checking sizes...`);
+  console.log('📋 Available sizes for matched type:', typeMatchedItems.map(item => item.size));
+  console.log('📋 Type matching success - matched items:', typeMatchedItems.map((item: any) => ({
+    id: item._id,
+    category: item.category,
+    type: item.type,
+    size: item.size,
+    quantity: item.quantity
+  })));
   
-  // Then filter by size with flexible matching
-  let result: (import('../models/uniformModel').IUniformInventory & mongoose.Document) | null = null;
+  // CRITICAL: Size matching strategy depends on item type
+  // - Beret: EXACT match only (no normalization, no alternative strategies)
+  // - PVC Shoes/Boot: Normalize UK prefix ("UK 7" → "7"), try both formats
+  // - Other items: Flexible matching (normalize spaces, case-insensitive)
+  // Note: isBeret is already declared above (line 626), reuse it here
+  const isShoeOrBoot = normalizedType.toLowerCase().includes('shoe') || 
+                       normalizedType.toLowerCase().includes('boot') ||
+                       normalizedType.toLowerCase() === 'pvc shoes';
+  
+  // Then filter by size with type-specific matching
+  // Note: typeMatchedItems is from .lean() so it's a plain object, not a Document
+  let result: any = null;
   
   if (normalizedSize === null) {
     // For null size, find items with null, empty, or missing size
-    result = typeMatchedItems.find(item => 
-      !item.size || 
-      item.size === null || 
-      item.size === '' || 
-      item.size.trim() === '' ||
-      item.size.toLowerCase() === 'n/a'
-    ) || null;
+    // CRITICAL: Check for null/undefined first before calling string methods
+    // Database stores null for accessories, but might also store "N/A" or empty string
+    console.log(`🔍 Searching for null-size item (accessory). Checking ${typeMatchedItems.length} items with matching type...`);
+    result = typeMatchedItems.find((item: any) => {
+      const itemSize = item.size;
+      // Handle null, undefined, or missing size
+      if (!itemSize || itemSize === null || itemSize === undefined || itemSize === '') {
+        console.log(`✅ Found null-size match: item.size = ${itemSize}`);
+        return true;
+      }
+      // Handle string values that represent "no size" (N/A, empty after trim)
+      // CRITICAL: Convert to string first to avoid errors with null
+      try {
+        const itemSizeStr = String(itemSize);
+        if (itemSizeStr.trim() === '' || itemSizeStr.toLowerCase().trim() === 'n/a') {
+          console.log(`✅ Found N/A/empty-size match: item.size = "${itemSizeStr}"`);
+          return true;
+        }
+      } catch (e) {
+        // If conversion fails, itemSize is likely null/undefined and already handled above
+        return false;
+      }
+      return false;
+    }) || null;
+    
+    if (!result) {
+      console.log(`❌ No null-size item found. Available sizes in database:`, typeMatchedItems.map((i: any) => `"${i.size}" (type: ${typeof i.size})`));
+    }
+  } else if (isBeret) {
+    // CRITICAL: Beret - EXACT match only (no normalization, no alternative strategies)
+    // Fractional sizes like "6 3/4" must match exactly (including spaces)
+    // DO NOT use normalizeSize() which removes spaces
+    result = typeMatchedItems.find((item: any) => {
+      if (!item.size) return false;
+      
+      // EXACT match only: "6 3/4" must match "6 3/4" exactly
+      const itemSize = String(item.size).trim();
+      const searchSize = size ? String(size).trim() : '';
+      
+      if (itemSize === searchSize) {
+        console.log(`✅ Beret EXACT match: "${itemSize}" === "${searchSize}"`);
+        return true;
+      }
+      
+      return false;
+    }) || null;
+    
+    if (!result) {
+      console.log(`❌ Beret size not found - EXACT match required:`, {
+        requestedSize: size,
+        availableSizes: typeMatchedItems.map((i: any) => i.size)
+      });
+    }
+  } else if (isShoeOrBoot) {
+    // PVC Shoes/Boot - Normalize UK prefix and try both formats
+    // Frontend may send "UK 7" or "7", database may have either format
+    const searchNumeric = extractNumericSize(size);
+    const sizeWithoutUK = size ? String(size).replace(/^UK\s*/i, '').trim() : '';
+    
+    result = typeMatchedItems.find((item: any) => {
+      if (!item.size) return false;
+      
+      const itemSize = String(item.size).trim();
+      const itemSizeWithoutUK = itemSize.replace(/^UK\s*/i, '').trim();
+      
+      // Strategy 1: Exact match with original size
+      if (itemSize === size || itemSize === sizeWithoutUK) {
+        console.log(`✅ Shoe/Boot exact match: "${itemSize}" === "${size}"`);
+        return true;
+      }
+      
+      // Strategy 2: Match after removing UK prefix from both
+      if (itemSizeWithoutUK === sizeWithoutUK && sizeWithoutUK) {
+        console.log(`✅ Shoe/Boot match (both without UK): "${itemSize}" → "${itemSizeWithoutUK}" === "${sizeWithoutUK}"`);
+        return true;
+      }
+      
+      // Strategy 3: Match numeric parts (handles "UK 7" vs "7")
+      if (searchNumeric) {
+        const itemNumeric = extractNumericSize(item.size);
+        if (itemNumeric && itemNumeric === searchNumeric) {
+          console.log(`✅ Shoe/Boot numeric match: "${item.size}" (${itemNumeric}) === "${size}" (${searchNumeric})`);
+          return true;
+        }
+      }
+      
+      return false;
+    }) || null;
   } else {
-    // For non-null size, match by normalizing both values (remove spaces, uppercase)
-    // Also try matching with original size variations and numeric extraction
+    // Other items (Uniform No 3, etc.) - Flexible matching
+    // Normalize spaces and case for matching
     const searchNumeric = extractNumericSize(size);
     
-    result = typeMatchedItems.find(item => {
+    result = typeMatchedItems.find((item: any) => {
       if (!item.size) return false;
       
       // Strategy 1: Normalize both for comparison (remove spaces, uppercase)
@@ -734,7 +1032,7 @@ async function findInventoryItem(
       const searchNoSpaces = searchTrimmed.replace(/\s+/g, '').toUpperCase();
       if (itemNoSpaces === searchNoSpaces) return true;
       
-      // Strategy 4: Extract and compare numeric parts (handles "UK 7" matching "7")
+      // Strategy 4: Extract and compare numeric parts (for sizes with numbers)
       if (searchNumeric) {
         const itemNumeric = extractNumericSize(item.size);
         if (itemNumeric && itemNumeric === searchNumeric) {
@@ -774,8 +1072,11 @@ async function findInventoryItem(
 export const deductInventory = async (req: AuthRequest, res: Response) => {
   // ⚠️ WARNING: This endpoint may be redundant if frontend also calls POST /api/members/uniform
   // If items already exist in user's uniform, this will skip deduction (by design)
-  console.log(`\n🟠 ===== DEDUCT INVENTORY REQUEST (Legacy Endpoint) =====`);
-  console.log(`⚠️  Note: If frontend also calls POST /api/members/uniform, items may already exist and deduction will be skipped`);
+  console.log(`\n🟠 ===== DEDUCT INVENTORY REQUEST =====`);
+  console.log(`Timestamp: ${new Date().toISOString()}`);
+  console.log(`User: ${req.user?.sispaId}`);
+  console.log(`Request body:`, JSON.stringify(req.body, null, 2));
+  console.log(`Items count: ${req.body?.items?.length || 0}`);
   
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -791,20 +1092,27 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { items } = req.body;
+    const { items, oldItems } = req.body;
 
     // Validate request body
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    // CRITICAL: Allow empty items array if oldItems is provided (for restore-only operations)
+    // Only throw error if both items and oldItems are empty
+    if ((!items || !Array.isArray(items) || items.length === 0) && 
+        (!oldItems || !Array.isArray(oldItems) || oldItems.length === 0)) {
       await session.abortTransaction();
       session.endSession();
       return res.status(400).json({ 
         success: false, 
-        message: 'Items array is required and must not be empty' 
+        message: 'Items array or oldItems array is required and at least one must not be empty' 
       });
     }
+    
+    // If items is empty but oldItems exists, allow it (restore-only operation)
+    // Normalize items to empty array if not provided
+    const itemsToProcess = (items && Array.isArray(items)) ? items : [];
 
-    // Validate each item
-    for (const item of items) {
+    // Validate each item (only if items array is not empty)
+    for (const item of itemsToProcess) {
       if (!item.category || !item.type || item.quantity === undefined) {
         await session.abortTransaction();
         session.endSession();
@@ -825,23 +1133,52 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
 
     const errors: any[] = [];
     const deducted: any[] = [];
+    const restored: any[] = [];
     const inventoryUpdates: Array<{ 
       item: any; 
       inventoryItem: import('../models/uniformModel').IUniformInventory & mongoose.Document; 
       deduction: number 
     }> = [];
 
+    // Log each item being processed
+    console.log(`\n📦 Processing ${itemsToProcess.length} items for deduction:`);
+    if (itemsToProcess.length > 0) {
+      itemsToProcess.forEach((item, idx) => {
+        console.log(`  ${idx + 1}. ${item.type} (${item.size || 'no size'}) - Status: ${item.status || 'Not provided (will default to Available)'}`);
+      });
+    } else {
+      console.log(`  (No items to process - restore-only operation)`);
+    }
+    
     // Fetch existing uniform to calculate net change
     const uniform = await MemberUniform.findOne({ sispaId: req.user.sispaId }).session(session) || null;
-
-    // Step 1: Validate all items and check stock availability
-    for (const item of items) {
+    console.log(`\n📋 Existing uniform in database: ${uniform ? `${uniform.items.length} items` : 'none'}`);
+    
+    // Step 1: Process each item according to status-based deduction logic
+    for (const item of itemsToProcess) {
       // Skip inventory check for custom-ordered items (e.g., Nametag)
       if (isCustomOrderedItem(item.type)) {
         console.log(`⏭️  Skipping inventory deduction for custom-ordered item: ${item.type}`);
         continue; // Skip this item - no inventory deduction needed
       }
+
+      // ✅ A) If item.status !== "Available" → do nothing
+      const itemStatus = (item.status || 'Available').trim();
+      if (itemStatus !== 'Available') {
+        console.log(`⏭️  Skipping inventory deduction for item with status "${itemStatus}": ${item.type} (${item.size || 'no size'})`);
+        continue; // Skip deduction for non-Available items
+      }
+
+      // ✅ B) If item.status === "Available" → process deduction
       // Find matching inventory item
+      console.log(`\n🔍 Processing item for deduction:`, {
+        category: item.category,
+        type: item.type,
+        size: item.size,
+        quantity: item.quantity,
+        status: itemStatus
+      });
+      
       const inventoryItem = await findInventoryItem(
         item.category,
         item.type,
@@ -852,6 +1189,13 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
       const normalizedSize = normalizeSize(item.size);
 
       if (!inventoryItem) {
+        console.error(`❌ Item NOT FOUND in inventory:`, {
+          category: item.category,
+          type: item.type,
+          size: normalizedSize,
+          searchedType: item.type,
+          searchedSize: item.size
+        });
         errors.push({
           category: item.category,
           type: item.type,
@@ -861,40 +1205,23 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
         continue;
       }
       
-      // 🔹 FIND EXISTING USER UNIFORM ITEM (FOR UPDATE CASE)
-      const existingItem = uniform?.items.find(
-        (u: any) =>
-          u.category === item.category &&
-          u.type === item.type &&
-          normalizeSize(u.size) === normalizedSize
-      );
-
-       // 🔁 FIND OLD ITEM WITH SAME CATEGORY & TYPE BUT DIFFERENT SIZE
-       const oldItemDifferentSize = uniform?.items.find(
-         u =>
-           u.category === item.category &&
-           u.type === item.type &&
-           normalizeSize(u.size) !== normalizedSize
-       );
-
-      // 🔹 CALCULATE NET CHANGE (FIX)
-      // If there's a size change, we need to handle it differently
-      let previousQty = existingItem ? existingItem.quantity : 0;
+      console.log(`✅ Item FOUND in inventory:`, {
+        inventoryId: inventoryItem._id,
+        inventoryCategory: inventoryItem.category,
+        inventoryType: inventoryItem.type,
+        inventorySize: inventoryItem.size,
+        availableQuantity: inventoryItem.quantity
+      });
       
-      // If changing size, the old item quantity should be considered
-      if (oldItemDifferentSize && !existingItem) {
-        // Size change: old size exists, new size doesn't
-        // We'll return old quantity to inventory, so deduction is full new quantity
-        previousQty = 0;
-      } else if (oldItemDifferentSize && existingItem) {
-        // Both old and new sizes exist - this shouldn't happen normally, but handle it
-        // Deduction is the difference between new and existing new size quantity
-        previousQty = existingItem.quantity;
-      }
+      // ✅ CRITICAL: /deduct endpoint should ALWAYS deduct for Available items
+      // It should NOT check if items exist in uniform - that's the responsibility of save endpoints
+      // The /deduct endpoint is called separately to handle inventory deduction
       
-      const deduction = item.quantity - previousQty;
+      // Simply deduct the requested quantity
+      const deduction = item.quantity;
       
-      if (deduction > 0 && inventoryItem.quantity < deduction) {
+      if (inventoryItem.quantity < deduction) {
+        console.error(`❌ Insufficient stock: Requested ${deduction}, Available ${inventoryItem.quantity}`);
         errors.push({
           category: item.category,
           type: item.type,
@@ -903,53 +1230,117 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
           available: inventoryItem.quantity,
           message: 'Insufficient stock'
         });
+        continue;
       }
 
-      if (oldItemDifferentSize && uniform) {
-        const oldInventoryItem = await findInventoryItem(
-          oldItemDifferentSize.category,
-          oldItemDifferentSize.type,
-          oldItemDifferentSize.size,
+      inventoryUpdates.push({
+        item,
+        inventoryItem,
+        deduction: deduction
+      });
+      
+      console.log(`✅ Added to inventoryUpdates - Will deduct ${deduction} from inventory: ${item.type} (${normalizedSize || 'no size'})`);
+    }
+
+    // Log summary before error check
+    // Step 1.5: Restore inventory for old items (size changes, removed items)
+    if (oldItems && Array.isArray(oldItems) && oldItems.length > 0) {
+      console.log(`\n📦 Processing ${oldItems.length} old items for restore:`);
+      
+      for (const oldItem of oldItems) {
+        // Only restore if old item had "Available" status
+        const oldItemStatus = (oldItem.status || 'Available').trim();
+        if (oldItemStatus !== 'Available') {
+          console.log(`⏭️  Skipping restore for old item with status "${oldItemStatus}": ${oldItem.type} (${oldItem.size || 'no size'})`);
+          continue;
+        }
+        
+        // CRITICAL: Restore ONLY for size changes when status is "Available"
+        // Do NOT restore for:
+        // - Item removals
+        // - Status changes (Available -> Missing, etc.)
+        // - Any other changes
+        
+        // Check if this is a size change (old item exists in new items with different size AND both have "Available" status)
+        const sizeChangeItem = itemsToProcess.find((newItem: any) => {
+          const newItemStatus = (newItem.status || 'Available').trim();
+          // Both old and new must be "Available" for size change restore
+          if (newItemStatus !== 'Available') return false;
+          
+          const oldCat = (oldItem.category || '').toLowerCase().trim();
+          const oldType = normalizeTypeForMatching(oldItem.type || '');
+          const newCat = (newItem.category || '').toLowerCase().trim();
+          const newType = normalizeTypeForMatching(newItem.type || '');
+          const oldSizeNorm = normalizeSize(oldItem.size);
+          const newSizeNorm = normalizeSize(newItem.size);
+          
+          // Same category/type but different size = size change
+          return oldCat === newCat && oldType === newType && oldSizeNorm !== newSizeNorm;
+        });
+        
+        // ONLY restore if it's a size change with "Available" status
+        if (sizeChangeItem) {
+          console.log(`🔄 Size change detected - will restore old size and deduct new size: ${oldItem.type} (${oldItem.size || 'no size'} -> ${sizeChangeItem.size || 'no size'})`);
+        } else {
+          // Not a size change - skip restore (item removed, status changed, or other changes)
+          console.log(`⏭️  Skipping restore - not a size change with Available status: ${oldItem.type} (${oldItem.size || 'no size'})`);
+          continue;
+        }
+        
+        // Find inventory item for old item
+        const inventoryItem = await findInventoryItem(
+          oldItem.category,
+          oldItem.type,
+          oldItem.size,
           session
         );
-      
-        if (oldInventoryItem) {
-          // Return old quantity to inventory
-          oldInventoryItem.quantity += oldItemDifferentSize.quantity;
-          await oldInventoryItem.save({ session });
-          console.log(`✅ Returned ${oldItemDifferentSize.quantity} to inventory: ${oldItemDifferentSize.type} (${oldItemDifferentSize.size || 'no size'})`);
-        }
-      
-        // Remove old item from uniform (will be replaced with new size in Step 3)
-        uniform.items = uniform.items.filter(
-          u => u !== oldItemDifferentSize
-        );
-        console.log(`🔄 Removed old size item: ${oldItemDifferentSize.type} (${oldItemDifferentSize.size || 'no size'})`);
-      }
-      
-      // Only add to inventoryUpdates if there's actually a deduction needed
-      if (deduction > 0) {
-        inventoryUpdates.push({
-          item,
-          inventoryItem,
-          deduction: deduction
-        });
-      } else if (deduction < 0) {
-        // Quantity decreased - return the difference to inventory
-        const returnAmount = Math.abs(deduction);
+        
         if (inventoryItem) {
-          inventoryUpdates.push({
-            item,
-            inventoryItem,
-            deduction: deduction // Negative deduction means we're returning to inventory
+          const restoreAmount = oldItem.quantity || 1;
+          const oldQuantity = inventoryItem.quantity;
+          const newQuantity = oldQuantity + restoreAmount;
+          const newStatus = calculateStockStatus(newQuantity);
+          
+          // Restore inventory
+          await UniformInventory.findByIdAndUpdate(
+            inventoryItem._id,
+            { 
+              $inc: { quantity: restoreAmount }, // Positive value to ADD (restore)
+              status: newStatus
+            },
+            { session }
+          );
+          
+          restored.push({
+            category: oldItem.category,
+            type: oldItem.type,
+            size: normalizeSize(oldItem.size),
+            quantityRestored: restoreAmount,
+            oldInventoryQuantity: oldQuantity,
+            newInventoryQuantity: newQuantity
           });
-          console.log(`ℹ️  Quantity decreased for ${item.type} (${normalizedSize || 'no size'}): returning ${returnAmount} to inventory`);
+          
+          console.log(`✅ Restored ${restoreAmount} to inventory: ${oldItem.type} (${normalizeSize(oldItem.size) || 'no size'}) - Inventory: ${oldQuantity} → ${newQuantity}`);
+        } else {
+          console.warn(`⚠️  Could not find inventory item to restore: ${oldItem.type} (${oldItem.size || 'no size'})`);
         }
-      } else {
-        // No change in quantity (deduction = 0)
-        // This happens when item already exists in user's uniform with the same quantity
-        console.log(`ℹ️  No quantity change for ${item.type} (${normalizedSize || 'no size'}): ${item.quantity} (item already exists in uniform)`);
       }
+      
+      console.log(`📊 Restore summary: ${restored.length} items restored`);
+    }
+    
+    console.log(`\n📊 Processing Summary:`);
+    console.log(`  - Total items processed: ${itemsToProcess.length}`);
+    console.log(`  - Old items for restore: ${oldItems?.length || 0}`);
+    console.log(`  - Items restored: ${restored.length}`);
+    console.log(`  - Items added to inventoryUpdates: ${inventoryUpdates.length}`);
+    console.log(`  - Errors found: ${errors.length}`);
+    if (inventoryUpdates.length === 0 && errors.length === 0) {
+      console.warn(`⚠️  WARNING: No items were deducted and no errors were found!`);
+      console.warn(`   This usually means:`);
+      console.warn(`   1. Items were found but not added to inventoryUpdates (check Case 1/2 logic)`);
+      console.warn(`   2. Items already exist in uniform (Case 2a - unchanged)`);
+      console.warn(`   3. findInventoryItem is returning items but logic is skipping them`);
     }
 
     // If any errors, rollback and return
@@ -966,6 +1357,7 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
     }
 
     // Step 2: Deduct inventory for all items (all or nothing)
+    console.log(`\n💰 Starting inventory deduction: ${inventoryUpdates.length} items to process`);
     for (const update of inventoryUpdates) {
       // Handle both positive (deduction) and negative (return) deductions
       const newQuantity = update.inventoryItem.quantity - update.deduction;
@@ -994,7 +1386,7 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
     // Step 3: Update user's uniform collection
     if (uniform) {
       // Update or add items to uniform
-      for (const item of items) {
+      for (const item of itemsToProcess) {
         if (isCustomOrderedItem(item.type)) {
           continue; // Skip custom-ordered items
         }
@@ -1023,7 +1415,7 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
       await uniform.save({ session });
     } else {
       // Create new uniform if it doesn't exist
-      const uniformItems = items.filter(item => !isCustomOrderedItem(item.type));
+      const uniformItems = itemsToProcess.filter((item: any) => !isCustomOrderedItem(item.type));
       if (uniformItems.length > 0) {
         const newUniform = new MemberUniform({
           sispaId: req.user.sispaId,
@@ -1043,7 +1435,9 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
     res.json({
       success: true,
       message: 'Inventory deducted successfully',
-      deducted
+      deducted,
+      restored: restored.length > 0 ? restored : undefined,
+      restoredCount: restored.length
     });
   } catch (error: any) {
     // Rollback transaction on error
@@ -1070,118 +1464,189 @@ export const deductInventory = async (req: AuthRequest, res: Response) => {
 
 export const getUniforms = async (req: Request, res: Response) => {
   try {
-    console.log('📦 Fetching inventory items...');
+    const { category, type, size } = req.query;
+    const filter: any = {};
+
+    if (category) filter.category = category;
+    if (type) filter.type = type;
+    if (size !== undefined) {
+      filter.size = size === 'null' || size === '' ? null : size;
+    }
+
+    const inventory = await UniformInventory.find(filter)
+      // 🚀 IMPORTANT: DO NOT RETURN BASE64
+      // CRITICAL: Include price field (stored directly in UniformInventory for shirt items)
+      // Note: Using explicit field selection to ensure price is always included
+      .select('name category type size quantity status recommendedStock lastRecommendationDate price createdAt updatedAt')
+      .sort({ category: 1, type: 1, size: 1 })
+      .lean()
+      .maxTimeMS(8000); // fast fail
     
-    // Check database connection
-    if (mongoose.connection.readyState !== 1) {
-      console.error('❌ Database not connected');
-      return res.status(503).json({ 
-        success: false, 
-        message: 'Database connection not available' 
+    // 🔍 DEBUG: Verify price field is in query result
+    if (inventory.length > 0) {
+      const firstItem = inventory[0] as any;
+      console.log(`🔍 DEBUG: First item from database query:`, {
+        hasPriceField: 'price' in firstItem,
+        priceValue: firstItem.price,
+        priceType: typeof firstItem.price,
+        allFields: Object.keys(firstItem)
       });
     }
-    
-    // Explicitly select all fields including image and sizeChart
-    const inventory = await UniformInventory.find()
-      .select('name category type size quantity status recommendedStock lastRecommendationDate image sizeChart createdAt updatedAt')
-      .sort({ category: 1, type: 1, size: 1 });
-    
-    console.log(`✅ Found ${inventory.length} inventory items`);
-    
-    // Format response to match spec
-    // Build maps of images and size charts by category-type for efficient lookup
-    // Use normalized categories for consistency
-    const imageMap = new Map<string, string | null>();
-    const sizeChartMap = new Map<string, string | null>();
-    
-    // First pass: collect images from all items (using both original and normalized keys)
-    inventory.forEach(item => {
-      // Normalize category and type for key lookup
-      const normalizedType = normalizeTypeName(item.category, item.type);
-      const normalizedCategory = normalizeCategoryForStorage(item.category, normalizedType);
-      const normalizedKey = `${normalizedCategory}-${normalizedType}`;
-      
-      // Also create key with original category/type for backward compatibility
-      const originalKey = `${item.category}-${item.type}`;
-      
-      // Store image in map using normalized key
-      if (item.image && !imageMap.has(normalizedKey)) {
-        imageMap.set(normalizedKey, item.image);
-        console.log(`📸 Found image for ${normalizedKey}: length=${item.image.length}`);
-      }
-      
-      // Also store with original key if different
-      if (originalKey !== normalizedKey && item.image && !imageMap.has(originalKey)) {
-        imageMap.set(originalKey, item.image);
-      }
-      
-      // Store sizeChart in map
-      if (item.sizeChart && !sizeChartMap.has(normalizedKey)) {
-        sizeChartMap.set(normalizedKey, item.sizeChart);
-      }
-      if (originalKey !== normalizedKey && item.sizeChart && !sizeChartMap.has(originalKey)) {
-        sizeChartMap.set(originalKey, item.sizeChart);
-      }
-    });
-    
-    console.log(`📸 Image map contains ${imageMap.size} entries`);
 
-    const formattedInventory = inventory.map(item => {
-      const itemDoc = item as any;
-      // Normalize category and type for response (ensure accessories are in correct categories)
-      const normalizedType = normalizeTypeName(item.category, item.type);
-      const normalizedCategory = normalizeCategoryForStorage(item.category, normalizedType);
-      const chartKey = `${normalizedCategory}-${normalizedType}`;
-      
-      // Get image: prefer item's own image, then try map lookup, then null
-      let itemImage = item.image || null;
-      if (!itemImage) {
-        itemImage = imageMap.get(chartKey) || null;
-      }
-      
-      // Get sizeChart: prefer item's own sizeChart, then try map lookup, then null
-      let itemSizeChart = item.sizeChart || null;
-      if (!itemSizeChart) {
-        itemSizeChart = sizeChartMap.get(chartKey) || null;
-      }
-      
-      return {
-        id: String(itemDoc._id),
-        name: item.name || item.type, // Fallback to type if name missing
-        category: normalizedCategory, // Return normalized category
-        type: normalizedType, // Return normalized type
-        size: item.size,
-        quantity: item.quantity || 0, // Default to 0 if missing
-        status: item.status || calculateStockStatus(item.quantity || 0),
-        image: itemImage, // Include image field
-        sizeChart: itemSizeChart, // Include sizeChart field
-        createdAt: itemDoc.createdAt,
-        updatedAt: itemDoc.updatedAt
+    // Ensure all items have both id and _id for frontend compatibility
+    // CRITICAL: Price is now stored directly in UniformInventory (no need to fetch from ShirtPrice)
+    const inventoryWithIds = inventory.map((item: any) => {
+      const itemObj: any = {
+        ...item,
+        id: String(item._id), // Add id field for frontend compatibility
+        _id: String(item._id) // Keep _id as string for consistency
       };
+      
+      // CRITICAL: Price is already included from UniformInventory (if set by admin)
+      // For shirt items: price comes directly from UniformInventory.price
+      // For non-shirt items: price is null or undefined (not applicable)
+      // CRITICAL: ALWAYS ensure price field exists in response (frontend expects it)
+      // Frontend checks for 'price' field existence, so we must ALWAYS include it
+      if (!('price' in itemObj) || itemObj.price === undefined) {
+        itemObj.price = null; // Explicitly set to null if not present or undefined
+      }
+      // Ensure price is always a number or null (never undefined)
+      if (typeof itemObj.price !== 'number' && itemObj.price !== null) {
+        itemObj.price = null;
+      }
+      
+      return itemObj;
     });
 
-    console.log(`✅ Returning ${formattedInventory.length} formatted items`);
+    // 🔍 DEBUG: Log raw inventory API response structure
+    console.log(`🔍 DEBUG: Raw inventory API response structure:`);
+    console.log(`  - Total items: ${inventoryWithIds.length}`);
+    console.log(`  - Sample item fields:`, inventoryWithIds.length > 0 ? Object.keys(inventoryWithIds[0]) : 'no items');
+    if (inventoryWithIds.length > 0) {
+      console.log(`  - Sample item (first):`, {
+        id: inventoryWithIds[0].id,
+        category: inventoryWithIds[0].category,
+        type: inventoryWithIds[0].type,
+        size: inventoryWithIds[0].size,
+        price: inventoryWithIds[0].price,
+        hasPriceField: 'price' in inventoryWithIds[0]
+      });
+    }
 
-    res.json({ 
-      success: true, 
-      inventory: formattedInventory,
-      count: formattedInventory.length
+    // 🔍 DEBUG: Log all shirt items and their prices
+    const shirtItems = inventoryWithIds.filter((item: any) => {
+      const category = item.category?.toLowerCase() || '';
+      return category === 'shirt' || category === 't-shirt';
+    });
+    
+    if (shirtItems.length > 0) {
+      console.log(`🔍 DEBUG: Shirt items from API response (${shirtItems.length} items):`);
+      shirtItems.forEach((item: any) => {
+        const hasPrice = item.price !== null && item.price !== undefined;
+        const priceValue = hasPrice ? `RM ${item.price}` : 'null/undefined';
+        console.log(`  - ${item.type} (${item.size || 'no size'}): price = ${priceValue} ${hasPrice ? '✅' : '⚠️ MISSING'}`);
+        
+        if (!hasPrice) {
+          console.warn(`⚠️  Shirt item found but price is missing:`, {
+            id: item.id,
+            category: item.category,
+            type: item.type,
+            size: item.size,
+            price: item.price,
+            priceType: typeof item.price
+          });
+        }
+      });
+    } else {
+      console.log(`🔍 DEBUG: No shirt items found in inventory response`);
+    }
+
+    const count = await UniformInventory.countDocuments(filter);
+
+    // 🔍 FINAL VERIFICATION: Ensure ALL items have price field before sending response
+    const verifiedInventory = inventoryWithIds.map((item: any) => {
+      // CRITICAL: Frontend expects 'price' field to exist on ALL items
+      // If price is missing, explicitly add it as null
+      if (!('price' in item)) {
+        item.price = null;
+      }
+      // Ensure price is never undefined
+      if (item.price === undefined) {
+        item.price = null;
+      }
+      return item;
+    });
+
+    // 🔍 FINAL DEBUG: Verify price field exists in ALL items before sending
+    const itemsWithoutPrice = verifiedInventory.filter((item: any) => !('price' in item));
+    if (itemsWithoutPrice.length > 0) {
+      console.error(`❌ CRITICAL: ${itemsWithoutPrice.length} items missing 'price' field! This should not happen.`);
+    } else {
+      console.log(`✅ VERIFIED: All ${verifiedInventory.length} items have 'price' field in response`);
+    }
+
+    // 🔍 DEBUG: Log sample of final response structure
+    if (verifiedInventory.length > 0) {
+      const sampleItem = verifiedInventory[0];
+      console.log(`🔍 FINAL: Sample item in response:`, {
+        id: sampleItem.id,
+        category: sampleItem.category,
+        type: sampleItem.type,
+        hasPriceField: 'price' in sampleItem,
+        priceValue: sampleItem.price,
+        priceType: typeof sampleItem.price,
+        allFields: Object.keys(sampleItem)
+      });
+    }
+
+    res.json({
+      success: true,
+      inventory: verifiedInventory,
+      count
     });
   } catch (error: any) {
     console.error('❌ Error fetching inventory:', error);
-    console.error('Error stack:', error.stack);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Error fetching inventory', 
-      error: error.message || 'Unknown error',
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch inventory'
     });
   }
 };
 
+export const getInventoryMedia = async (req: Request, res: Response) => {
+  try {
+    const { category, type } = req.query;
+
+    if (!category || !type) {
+      return res.status(400).json({
+        success: false,
+        message: 'category and type are required'
+      });
+    }
+
+    const item = await UniformInventory.findOne({ category, type })
+      .select('image sizeChart')
+      .lean()
+      .maxTimeMS(5000);
+
+    res.json({
+      success: true,
+      image: item?.image || null,
+      sizeChart: item?.sizeChart || null
+    });
+  } catch (error) {
+    console.error('❌ Error fetching inventory media:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch inventory media'
+    });
+  }
+};
+
+
 export const addUniform = async (req: Request, res: Response) => {
   try {
-    const { id, name, category, type, size, quantity, image, sizeChart } = req.body;
+    const { id, name, category, type, size, quantity, image, sizeChart, price } = req.body;
     
     // If ID is provided, treat this as an update request
     if (id && mongoose.Types.ObjectId.isValid(id)) {
@@ -1200,11 +1665,26 @@ export const addUniform = async (req: Request, res: Response) => {
       }
       
       const status = calculateStockStatus(quantity);
+
+      const updateData: any = { quantity, status };
+      
+      // ✅ allow updating price from this path too
+      if (price !== undefined) {
+        if (price !== null && (typeof price !== 'number' || price < 0)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Price must be a positive number or null to unset'
+          });
+        }
+        updateData.price = price === null ? null : price;
+      }
+      
       const updated = await UniformInventory.findByIdAndUpdate(
-        id, 
-        { quantity, status }, 
+        id,
+        updateData,
         { new: true, runValidators: true }
       );
+      
       
       if (!updated) {
         return res.status(404).json({ 
@@ -1214,21 +1694,24 @@ export const addUniform = async (req: Request, res: Response) => {
     }
 
       const updatedDoc = updated as any;
+      const itemId = String(updatedDoc._id);
       return res.json({
         success: true,
         message: 'Inventory item quantity updated successfully',
         inventory: {
-          id: String(updatedDoc._id),
+          id: itemId, // Include id field
+          _id: itemId, // Also include _id for compatibility
           name: updated.name,
           category: updated.category,
           type: updated.type,
           size: updated.size,
           quantity: updated.quantity,
           status: updated.status,
-          image: updated.image || null, // Include image in response
-          sizeChart: updated.sizeChart || null, // Include sizeChart in response
-          createdAt: updatedDoc.createdAt,
-          updatedAt: updatedDoc.updatedAt
+        image: updated.image || null, // Include image in response
+        sizeChart: updated.sizeChart || null, // Include sizeChart in response
+        price: updated.price !== undefined ? updated.price : null, // Include price in response
+        createdAt: updatedDoc.createdAt,
+        updatedAt: updatedDoc.updatedAt
         }
       });
     }
@@ -1340,6 +1823,16 @@ export const addUniform = async (req: Request, res: Response) => {
       }
     }
 
+    // Validate price if provided (for shirt items)
+    if (price !== undefined && price !== null) {
+      if (typeof price !== 'number' || price < 0) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Price must be a positive number or null to unset' 
+        });
+      }
+    }
+
     // Normalize size format (remove "UK" prefix for shoes/boots)
     // Use normalized type for size normalization
     let normalizedSize: string | null = null;
@@ -1378,28 +1871,220 @@ export const addUniform = async (req: Request, res: Response) => {
     // Check if item with same (category, type, size) already exists
     // For "Add Size" functionality, we want to prevent duplicates
     // Use normalized category and type for checking (but also check original for backward compatibility)
-    const existingItem = await UniformInventory.findOne({
-      $or: [
-        // Check with normalized category/type
-        { category: normalizedCategory, type: normalizedType, size: normalizedSize },
-        // Also check with original category/type for backward compatibility
-        { category: category, type: type, size: normalizedSize },
-        { category: category, type: normalizedType, size: normalizedSize },
-        // Check original size too
-        ...(size && size !== normalizedSize ? [
-          { category: normalizedCategory, type: normalizedType, size: size },
-          { category: category, type: type, size: size }
-        ] : [])
-      ]
+    // Use case-insensitive matching for better reliability
+    const categoryRegex = new RegExp(`^${String(normalizedCategory).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const typeRegex = new RegExp(`^${String(normalizedType).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const originalCategoryRegex = new RegExp(`^${String(category).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const originalTypeRegex = new RegExp(`^${String(type).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    
+    // Build query conditions array
+    const queryConditions: any[] = [];
+    
+    // Helper to build size condition
+    const buildSizeCondition = (sizeValue: string | null) => {
+      if (sizeValue !== null) {
+        return { size: sizeValue };
+      } else {
+        return { $or: [{ size: null }, { size: { $exists: false } }] };
+      }
+    };
+    
+    // Check with normalized category/type (case-insensitive)
+    queryConditions.push({
+      category: categoryRegex,
+      type: typeRegex,
+      ...buildSizeCondition(normalizedSize)
     });
+    
+    // Also check with original category/type for backward compatibility (case-insensitive)
+    queryConditions.push({
+      category: originalCategoryRegex,
+      type: originalTypeRegex,
+      ...buildSizeCondition(normalizedSize)
+    });
+    
+    queryConditions.push({
+      category: originalCategoryRegex,
+      type: typeRegex,
+      ...buildSizeCondition(normalizedSize)
+    });
+    
+    // Also check original size if it's different from normalized
+    if (size && size !== normalizedSize && normalizedSize !== null) {
+      queryConditions.push(
+        { category: categoryRegex, type: typeRegex, size: size },
+        { category: originalCategoryRegex, type: originalTypeRegex, size: size },
+        { category: originalCategoryRegex, type: typeRegex, size: size }
+      );
+    }
+    
+    const existingItem = await UniformInventory.findOne({ $or: queryConditions });
+    
+    // Log available items for this category/type to help with debugging
+    if (!existingItem) {
+      const availableItems = await UniformInventory.find({
+        $or: [
+          { category: categoryRegex, type: typeRegex },
+          { category: originalCategoryRegex, type: originalTypeRegex },
+          { category: originalCategoryRegex, type: typeRegex }
+        ]
+      })
+      .select('_id category type size quantity')
+      .lean()
+      .limit(20); // Limit to avoid too much logging
+      
+      console.log(`📋 Available items for category "${category}" / type "${type}":`, 
+        availableItems.map((item: any) => ({
+          id: String(item._id),
+          _id: String(item._id),
+          category: item.category,
+          type: item.type,
+          size: item.size || 'no size',
+          quantity: item.quantity
+        }))
+      );
+    }
 
     if (existingItem) {
-      // Size already exists - return error (don't add to quantity)
-      // Display the original size input for better error message
-      const sizeDisplay = size || normalizedSize || 'no size';
-      return res.status(400).json({ 
-        success: false, 
-        message: `Size '${sizeDisplay}' already exists for this item type` 
+      // Size already exists - update the existing item instead of creating a new one
+      // This handles the case where frontend tries to save quantity for an existing item
+      const existingItemId = String(existingItem._id);
+      console.log(`🔄 Item already exists, updating quantity: ${existingItem.type} (${existingItem.size || 'no size'})`);
+      console.log(`📋 Found existing item structure:`, {
+        id: existingItemId,
+        _id: existingItemId,
+        category: existingItem.category,
+        type: existingItem.type,
+        size: existingItem.size,
+        currentQuantity: existingItem.quantity,
+        hasImage: !!existingItem.image,
+        hasSizeChart: !!existingItem.sizeChart
+      });
+      
+      // Update quantity and status
+      const status = calculateStockStatus(quantity);
+      const updateData: any = {
+        quantity,
+        status,
+        updatedAt: new Date()
+      };
+      
+      // Update image if provided
+      if (image !== undefined && image !== null && image !== '') {
+        updateData.image = image;
+      } else if (!existingItem.image) {
+        // Get image from other items of same type if current item doesn't have one
+        const existingTypeItemForImage = await UniformInventory.findOne({
+          $and: [
+            {
+              $or: [
+                { category: normalizedCategory, type: normalizedType },
+                { category: category, type: type },
+                { category: normalizedCategory, type: type }
+              ]
+            },
+            { image: { $exists: true, $ne: null } },
+            { image: { $ne: '' } },
+            { _id: { $ne: existingItem._id } }
+          ]
+        });
+        if (existingTypeItemForImage && existingTypeItemForImage.image) {
+          updateData.image = existingTypeItemForImage.image;
+        }
+      }
+      
+      // Update sizeChart if provided
+      if (sizeChart !== undefined && sizeChart !== null && sizeChart !== '') {
+        updateData.sizeChart = sizeChart;
+      } else if (!existingItem.sizeChart) {
+        // Get sizeChart from other items of same type if current item doesn't have one
+        const existingTypeItemForSizeChart = await UniformInventory.findOne({
+          $and: [
+            {
+              $or: [
+                { category: normalizedCategory, type: normalizedType },
+                { category: category, type: type },
+                { category: normalizedCategory, type: type }
+              ]
+            },
+            { sizeChart: { $exists: true, $ne: null } },
+            { sizeChart: { $ne: '' } },
+            { _id: { $ne: existingItem._id } }
+          ]
+        });
+        if (existingTypeItemForSizeChart && existingTypeItemForSizeChart.sizeChart) {
+          updateData.sizeChart = existingTypeItemForSizeChart.sizeChart;
+        }
+      }
+
+      // Update price if provided (for shirt items)
+      if (price !== undefined) {
+        updateData.price = price === null || price === '' ? null : price;
+      } else if (existingItem.price === undefined || existingItem.price === null) {
+        // Get price from other items of same type if current item doesn't have one
+        const existingTypeItemForPrice = await UniformInventory.findOne({
+          $and: [
+            {
+              $or: [
+                { category: normalizedCategory, type: normalizedType },
+                { category: category, type: type },
+                { category: normalizedCategory, type: type }
+              ]
+            },
+            { price: { $exists: true, $ne: null } },
+            { _id: { $ne: existingItem._id } }
+          ]
+        });
+        if (existingTypeItemForPrice && existingTypeItemForPrice.price !== undefined && existingTypeItemForPrice.price !== null) {
+          updateData.price = existingTypeItemForPrice.price;
+        }
+      }
+      
+      // Update the existing item
+      const updated = await UniformInventory.findByIdAndUpdate(
+        existingItem._id,
+        updateData,
+        { new: true, runValidators: true }
+      );
+      
+      if (!updated) {
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Failed to update existing inventory item' 
+        });
+      }
+      
+      const updatedDoc = updated as any;
+      const itemId = String(updatedDoc._id);
+      console.log(`✅ Updated existing inventory item: ${updated.type} (${updated.size || 'no size'}) - New quantity: ${updated.quantity}`);
+      console.log(`📋 Updated item structure:`, {
+        id: itemId,
+        _id: itemId,
+        category: updated.category,
+        type: updated.type,
+        size: updated.size,
+        quantity: updated.quantity,
+        hasImage: !!updated.image,
+        hasSizeChart: !!updated.sizeChart
+      });
+      
+      return res.json({
+        success: true,
+        message: 'Inventory item quantity updated successfully',
+        item: {
+          id: itemId, // Include id field
+          _id: itemId, // Also include _id for compatibility
+          name: updated.name,
+          category: updated.category,
+          type: updated.type,
+          size: updated.size,
+          quantity: updated.quantity,
+          status: updated.status,
+          image: updated.image || null,
+          sizeChart: updated.sizeChart || null,
+          createdAt: updatedDoc.createdAt,
+          updatedAt: updatedDoc.updatedAt
+        }
       });
     }
 
@@ -1437,6 +2122,23 @@ export const addUniform = async (req: Request, res: Response) => {
       }
     }
 
+    // Get price from existing items of the same type if not provided (for shirt items)
+    // This ensures consistency - all sizes of the same shirt type share the same price
+    // Check both normalized and original category/type
+    let finalPrice = price !== undefined ? (price === null || price === '' ? null : price) : null;
+    if (!finalPrice) {
+      const existingTypeItemForPrice = await UniformInventory.findOne({
+        $or: [
+          { category: normalizedCategory, type: normalizedType },
+          { category: category, type: type },
+          { category: normalizedCategory, type: type }
+        ]
+      });
+      if (existingTypeItemForPrice && existingTypeItemForPrice.price !== undefined && existingTypeItemForPrice.price !== null) {
+        finalPrice = existingTypeItemForPrice.price;
+      }
+    }
+
     // Create new item with normalized category and type
     const newInventory = new UniformInventory({
       name: itemName, // Use auto-generated name
@@ -1446,7 +2148,8 @@ export const addUniform = async (req: Request, res: Response) => {
       quantity,
       status: calculateStockStatus(quantity),
       image: finalImage, // Include image field
-      sizeChart: finalSizeChart // Include sizeChart field
+      sizeChart: finalSizeChart, // Include sizeChart field
+      price: finalPrice // Include price field (for shirt items)
     });
     
     await newInventory.save();
@@ -1483,13 +2186,39 @@ export const addUniform = async (req: Request, res: Response) => {
       );
       console.log(`✅ Updated sizeChart for all items of type: ${normalizedCategory} - ${normalizedType}`);
     }
+
+    // If price was provided and different from existing, update all items of this type (for shirt items)
+    // CRITICAL: Price is stored per shirt type (same for all sizes), like image and sizeChart
+    if (price !== undefined) {
+      const priceValue = price === null || price === '' ? null : price;
+      const finalPriceValue = finalPrice === null || finalPrice === undefined ? null : finalPrice;
+      // Only update if price is different from finalPrice
+      if (priceValue !== finalPriceValue) {
+        const itemCategory = normalizedCategory?.toLowerCase() || '';
+        if (itemCategory === 'shirt' || itemCategory === 't-shirt') {
+          await UniformInventory.updateMany(
+            {
+              $or: [
+                { category: normalizedCategory, type: normalizedType },
+                { category: category, type: type } // Also update old category/type entries
+              ],
+              price: { $ne: priceValue }
+            },
+            { $set: { price: priceValue } }
+          );
+          console.log(`✅ Updated price for all items of shirt type: ${normalizedCategory} - ${normalizedType} - Price: ${priceValue !== null ? `RM ${priceValue}` : 'null'}`);
+        }
+      }
+    }
     
     const newDoc = newInventory as any;
+    const itemId = String(newDoc._id);
     res.status(201).json({ 
       success: true, 
       message: 'Inventory item created successfully', 
       item: {
-        id: String(newDoc._id),
+        id: itemId, // Include id field
+        _id: itemId, // Also include _id for compatibility
         image: newInventory.image || null, // Include image in response
         name: newInventory.name,
         category: newInventory.category, // Return normalized category
@@ -1498,6 +2227,7 @@ export const addUniform = async (req: Request, res: Response) => {
         quantity: newInventory.quantity,
         status: newInventory.status,
         sizeChart: newInventory.sizeChart || null, // Include sizeChart in response
+        price: newInventory.price !== undefined ? newInventory.price : null, // Include price in response
         createdAt: newDoc.createdAt,
         updatedAt: newDoc.updatedAt
       }
@@ -1524,7 +2254,7 @@ export const addUniform = async (req: Request, res: Response) => {
 export const updateUniform = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { quantity, category, type, size, image, sizeChart } = req.body;
+    const { quantity, category, type, size, image, sizeChart, price } = req.body;
 
     // Support two update modes:
     // 1. Update by ID with quantity/image/sizeChart (partial updates allowed)
@@ -1579,11 +2309,22 @@ export const updateUniform = async (req: Request, res: Response) => {
         updateData.sizeChart = sizeChart === '' || sizeChart === null ? null : sizeChart;
       }
 
+      // Update price if provided (for shirt items)
+      if (price !== undefined) {
+        if (price !== null && (typeof price !== 'number' || price < 0)) {
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Price must be a positive number or null to unset' 
+          });
+        }
+        updateData.price = price === null || price === '' ? null : price;
+      }
+
       // Check if there's anything to update
       if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ 
           success: false, 
-          message: 'No fields provided to update. Provide at least one of: quantity, image, or sizeChart' 
+          message: 'No fields provided to update. Provide at least one of: quantity, image, sizeChart, or price' 
         });
       }
 
@@ -1591,7 +2332,7 @@ export const updateUniform = async (req: Request, res: Response) => {
       id, 
         updateData, 
       { new: true, runValidators: true }
-    ).select('name category type size quantity status recommendedStock lastRecommendationDate image sizeChart createdAt updatedAt');
+    ).select('name category type size quantity status recommendedStock lastRecommendationDate image sizeChart price createdAt updatedAt');
       
       // If image was updated, update all items of the same type for consistency
       // Use both original and normalized category/type to catch all items
@@ -1635,6 +2376,30 @@ export const updateUniform = async (req: Request, res: Response) => {
         console.log(`✅ Updated sizeChart for ${updateResult.modifiedCount} items of type: ${updated.category} - ${updated.type} (normalized: ${normalizedCategory} - ${normalizedType})`);
       }
 
+      // If price was updated for shirt items, update all sizes of the same type for consistency
+      // CRITICAL: Price is stored per shirt type (same for all sizes), like image and sizeChart
+      if (price !== undefined && updated) {
+        const itemCategory = updated.category?.toLowerCase() || '';
+        if (itemCategory === 'shirt' || itemCategory === 't-shirt') {
+          const normalizedType = normalizeTypeName(updated.category, updated.type);
+          const normalizedCategory = normalizeCategoryForStorage(updated.category, normalizedType);
+          const priceValue = price === null || price === '' ? null : price;
+          
+          // Update all items matching either original or normalized category/type
+          const updateResult = await UniformInventory.updateMany(
+            {
+              $or: [
+                { category: updated.category, type: updated.type },
+                { category: normalizedCategory, type: normalizedType }
+              ],
+              _id: { $ne: id }
+            },
+            { $set: { price: priceValue } }
+          );
+          console.log(`✅ Updated price for ${updateResult.modifiedCount} items of shirt type: ${updated.category} - ${updated.type} (normalized: ${normalizedCategory} - ${normalizedType}) - Price: ${priceValue !== null ? `RM ${priceValue}` : 'null'}`);
+        }
+      }
+
     if (!updated) {
       return res.status(404).json({ 
         success: false, 
@@ -1653,11 +2418,13 @@ export const updateUniform = async (req: Request, res: Response) => {
       }
 
     const updatedDoc = updated as any;
+    const itemId = String(updatedDoc._id);
       return res.json({ 
       success: true, 
       message: 'Inventory item updated successfully', 
       item: {
-        id: String(updatedDoc._id),
+        id: itemId, // Include id field
+        _id: itemId, // Also include _id for compatibility
         name: updated.name,
         category: updated.category,
         type: updated.type,
@@ -1666,6 +2433,7 @@ export const updateUniform = async (req: Request, res: Response) => {
         status: updated.status,
         image: updated.image || null, // Include image in response
         sizeChart: updated.sizeChart || null, // Include sizeChart in response
+        price: updated.price !== undefined ? updated.price : null, // Include price in response
         createdAt: updatedDoc.createdAt,
         updatedAt: updatedDoc.updatedAt
       }
@@ -1733,11 +2501,22 @@ export const updateUniform = async (req: Request, res: Response) => {
         item.sizeChart = sizeChart === '' || sizeChart === null ? null : sizeChart;
       }
 
+      // Update price if provided (for shirt items)
+      if (price !== undefined) {
+        if (price !== null && (typeof price !== 'number' || price < 0)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Price must be a positive number or null to unset'
+          });
+        }
+        item.price = price === null || price === '' ? null : price;
+      }
+
       // Check if there's anything to update
-      if (quantity === undefined && image === undefined && sizeChart === undefined) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'No fields provided to update. Provide at least one of: quantity, image, or sizeChart' 
+      if (quantity === undefined && image === undefined && sizeChart === undefined && price === undefined) {
+        return res.status(400).json({
+          success: false,
+          message: 'No fields provided to update. Provide at least one of: quantity, image, sizeChart, or price'
         });
       }
       
@@ -1760,6 +2539,19 @@ export const updateUniform = async (req: Request, res: Response) => {
         );
         console.log(`✅ Updated sizeChart for all items of type: ${item.category} - ${item.type}`);
       }
+
+      // If price was updated for shirt items, update all sizes of the same type for consistency
+      if (price !== undefined) {
+        const itemCategory = item.category?.toLowerCase() || '';
+        if (itemCategory === 'shirt' || itemCategory === 't-shirt') {
+          const priceValue = price === null || price === '' ? null : price;
+          await UniformInventory.updateMany(
+            { category: item.category, type: item.type, _id: { $ne: item._id } },
+            { $set: { price: priceValue } }
+          );
+          console.log(`✅ Updated price for all items of shirt type: ${item.category} - ${item.type} - Price: ${priceValue !== null ? `RM ${priceValue}` : 'null'}`);
+        }
+      }
       
       const itemDoc = item as any;
       return res.json({ 
@@ -1773,10 +2565,11 @@ export const updateUniform = async (req: Request, res: Response) => {
           size: item.size,
           quantity: item.quantity,
           status: item.status,
-          image: item.image || null, // Include image in response
-          sizeChart: item.sizeChart || null, // Include sizeChart in response
-          createdAt: itemDoc.createdAt,
-          updatedAt: itemDoc.updatedAt
+        image: item.image || null, // Include image in response
+        sizeChart: item.sizeChart || null, // Include sizeChart in response
+        price: item.price !== undefined ? item.price : null, // Include price in response
+        createdAt: itemDoc.createdAt,
+        updatedAt: itemDoc.updatedAt
         }
       });
     }
@@ -1802,12 +2595,22 @@ export const deleteUniform = async (req: Request, res: Response) => {
     
     console.log('🗑️ Delete request by ID:', id);
     
-    // Validate ID format
+    // CRITICAL: Check if this is a route conflict (should be handled by /by-attributes route)
+    // This is a safeguard in case route ordering didn't work or server wasn't restarted
+    if (id === 'by-attributes' || id === 'type') {
+      console.error('❌ Route conflict detected: Request to /:id with "by-attributes" or "type" - This should be handled by specific routes');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid request. Please use DELETE /api/inventory/by-attributes with body {category, type, size} or DELETE /api/inventory/type/:category/:type' 
+      });
+    }
+    
+    // Validate ID format - must be a valid MongoDB ObjectId
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
       console.log('❌ Invalid ID format:', id);
       return res.status(400).json({ 
         success: false, 
-        message: 'Invalid inventory item ID' 
+        message: `Invalid inventory item ID: "${id}". ID must be a valid MongoDB ObjectId.` 
       });
     }
     
@@ -1822,12 +2625,41 @@ export const deleteUniform = async (req: Request, res: Response) => {
       });
     }
     
-    console.log(`✅ Found item to delete: ${item.type} (${item.size || 'no size'}) - Category: ${item.category}`);
+    console.log(`✅ Found item to delete: ${item.type} (${item.size || 'no size'}) - Category: ${item.category}, Quantity: ${item.quantity}`);
     
-    // Delete the item permanently from database
-    await UniformInventory.findByIdAndDelete(id);
+    // CRITICAL: PERMANENTLY DELETE the item from database
+    // Using deleteOne() for explicit permanent deletion (NOT soft delete, NOT setting quantity to 0)
+    const deleteResult = await UniformInventory.deleteOne({ _id: id });
     
-    console.log(`✅ Deleted inventory item: ${item.type} (${item.size || 'no size'}) - ID: ${id}`);
+    // Verify deletion was successful - check deletedCount
+    if (deleteResult.deletedCount === 0) {
+      console.error(`❌ Failed to delete item with ID: ${id} - deleteResult:`, deleteResult);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - deletion did not complete' 
+      });
+    }
+    
+    if (deleteResult.deletedCount !== 1) {
+      console.error(`❌ Unexpected deletion result for ID: ${id} - deletedCount: ${deleteResult.deletedCount}`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - unexpected deletion result' 
+      });
+    }
+    
+    // CRITICAL: Double-check - verify item NO LONGER EXISTS in database
+    // This ensures permanent deletion, not soft delete
+    const verifyDeleted = await UniformInventory.findById(id);
+    if (verifyDeleted) {
+      console.error(`❌ CRITICAL: Item still exists after deletion! ID: ${id} - This should NOT happen with deleteOne()`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - deletion did not complete' 
+      });
+    }
+    
+    console.log(`✅ Successfully PERMANENTLY DELETED inventory item from database: ${item.type} (${item.size || 'no size'}) - ID: ${id} - Record no longer exists`);
     
     res.json({ 
       success: true, 
@@ -1848,7 +2680,9 @@ export const deleteUniformByAttributes = async (req: Request, res: Response) => 
   try {
     const { category, type, size } = req.body;
     
+    console.log('🗑️ ===== DELETE BY ATTRIBUTES ENDPOINT CALLED =====');
     console.log('🗑️ Delete request received:', { category, type, size });
+    console.log('🗑️ Request body:', JSON.stringify(req.body, null, 2));
     
     if (!category || !type) {
       return res.status(400).json({ 
@@ -1886,10 +2720,13 @@ export const deleteUniformByAttributes = async (req: Request, res: Response) => 
     };
 
     // Find all items matching category and type
+    // OPTIMIZATION: Add limit to prevent loading too many items
     const allItems = await UniformInventory.find({
       category: query.category,
       type: query.type
-    });
+    })
+      .limit(1000) // Reasonable limit for category+type queries
+      .lean();
 
     console.log(`📦 Found ${allItems.length} items for category "${category}" and type "${type}"`);
     console.log('Available sizes:', allItems.map(i => i.size));
@@ -1984,12 +2821,41 @@ export const deleteUniformByAttributes = async (req: Request, res: Response) => 
       });
     }
 
-    console.log(`✅ Found item to delete: ${itemToDelete.type} (${itemToDelete.size || 'no size'}) - ID: ${itemToDelete._id}`);
+    console.log(`✅ Found item to delete: ${itemToDelete.type} (${itemToDelete.size || 'no size'}) - ID: ${itemToDelete._id}, Quantity: ${itemToDelete.quantity}`);
 
-    // Delete the item permanently
-    await UniformInventory.findByIdAndDelete(itemToDelete._id);
+    // CRITICAL: PERMANENTLY DELETE the item from database
+    // Using deleteOne() for explicit permanent deletion (NOT soft delete, NOT setting quantity to 0)
+    const deleteResult = await UniformInventory.deleteOne({ _id: itemToDelete._id });
     
-    console.log(`✅ Deleted inventory item by attributes: ${itemToDelete.type} (${itemToDelete.size || 'no size'})`);
+    // Verify deletion was successful - check deletedCount
+    if (deleteResult.deletedCount === 0) {
+      console.error(`❌ Failed to delete item with ID: ${itemToDelete._id} - deleteResult:`, deleteResult);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - deletion did not complete' 
+      });
+    }
+    
+    if (deleteResult.deletedCount !== 1) {
+      console.error(`❌ Unexpected deletion result for ID: ${itemToDelete._id} - deletedCount: ${deleteResult.deletedCount}`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - unexpected deletion result' 
+      });
+    }
+    
+    // CRITICAL: Double-check - verify item NO LONGER EXISTS in database
+    // This ensures permanent deletion, not soft delete
+    const verifyDeleted = await UniformInventory.findById(itemToDelete._id);
+    if (verifyDeleted) {
+      console.error(`❌ CRITICAL: Item still exists after deletion! ID: ${itemToDelete._id} - This should NOT happen with deleteOne()`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete inventory item - deletion did not complete' 
+      });
+    }
+    
+    console.log(`✅ Successfully PERMANENTLY DELETED inventory item from database: ${itemToDelete.type} (${itemToDelete.size || 'no size'}) - ID: ${itemToDelete._id} - Record no longer exists`);
 
     res.json({ 
       success: true, 
@@ -2065,8 +2931,8 @@ export const getOwnUniform = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Format items to include status fields
-    const formattedItems = formatUniformItemsWithStatus(
+    // Format items to include status fields (with prices for shirts)
+    const formattedItems = await formatUniformItemsWithStatus(
       uniform.items,
       uniform.createdAt,
       uniform.updatedAt
@@ -2112,8 +2978,16 @@ export const getMemberUniformBySispaId = async (req: AuthRequest, res: Response)
       });
     }
 
-    // Find uniform for the specified member
-    const uniform = await MemberUniform.findOne({ sispaId: sispaId.trim() });
+    // Find uniform for the specified member (with case-insensitive fallback)
+    const trimmedSispaId = sispaId.trim();
+    let uniform = await MemberUniform.findOne({ sispaId: trimmedSispaId });
+    
+    // Try case-insensitive search if exact match fails
+    if (!uniform) {
+      uniform = await MemberUniform.findOne({ 
+        sispaId: { $regex: new RegExp(`^${trimmedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
     
     if (!uniform) {
       return res.status(404).json({ 
@@ -2122,6 +2996,9 @@ export const getMemberUniformBySispaId = async (req: AuthRequest, res: Response)
         items: []
       });
     }
+    
+    // CRITICAL: Verify we're getting all items from database
+    console.log(`🔍 Found uniform for ${trimmedSispaId}: ${uniform.items?.length || 0} items in database`);
 
     // Log raw items from database for debugging
     console.log(`📋 Raw items from database for ${sispaId}:`, uniform.items.map((i: any) => 
@@ -2131,9 +3008,9 @@ export const getMemberUniformBySispaId = async (req: AuthRequest, res: Response)
       return acc;
     }, {}));
 
-    // Format items to include status fields
+    // Format items to include status fields (with prices for shirts)
     // Items in the uniform collection are considered "Available" (they've been issued/received)
-    const formattedItems = formatUniformItemsWithStatus(
+    const formattedItems = await formatUniformItemsWithStatus(
       uniform.items,
       uniform.createdAt,
       uniform.updatedAt
@@ -2162,6 +3039,115 @@ export const getMemberUniformBySispaId = async (req: AuthRequest, res: Response)
     res.status(500).json({ 
       success: false, 
       message: 'Error fetching uniform', 
+      error: error.message 
+    });
+  }
+};
+
+// ===============================
+// ADMIN: Delete member uniform by sispaId
+// ===============================
+export const deleteMemberUniformBySispaId = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'User not authenticated' 
+      });
+    }
+
+    const { sispaId } = req.params;
+
+    if (!sispaId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'SISPA ID is required' 
+      });
+    }
+
+    // Normalize sispaId to uppercase for query
+    const normalizedSispaId = sispaId.trim().toUpperCase();
+
+    console.log(`🗑️  DELETE MEMBER UNIFORM REQUEST: SISPA ID "${normalizedSispaId}"`);
+
+    // First, check if uniform exists and log details
+    const existingUniform = await MemberUniform.findOne({ 
+      sispaId: normalizedSispaId 
+    }) || await MemberUniform.findOne({ 
+      sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
+
+    if (existingUniform) {
+      console.log(`📋 Found uniform data to delete:`, {
+        sispaId: existingUniform.sispaId,
+        itemCount: existingUniform.items?.length || 0,
+        items: existingUniform.items?.map((i: any) => `${i.type} (${i.size || 'no size'})`).join(', ') || 'none'
+      });
+    }
+
+    // CRITICAL: Using deleteOne() for PERMANENT deletion from database
+    // This is NOT a soft delete - the record will be completely removed
+    let result = await MemberUniform.deleteOne({ sispaId: normalizedSispaId });
+    
+    if (result.deletedCount === 0) {
+      // Try case-insensitive search (for backward compatibility)
+      console.log(`⚠️  Exact match failed, trying case-insensitive search...`);
+      result = await MemberUniform.deleteOne({ 
+        sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+    }
+
+    // Verify deletion was successful
+    if (result.deletedCount === 0) {
+      console.log(`❌ No uniform data found to delete for SISPA ID: "${normalizedSispaId}"`);
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Uniform data not found for this member' 
+      });
+    }
+
+    if (result.deletedCount !== 1) {
+      console.error(`❌ Unexpected deletion result - deletedCount: ${result.deletedCount} (expected 1)`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete uniform data - unexpected deletion result' 
+      });
+    }
+
+    // CRITICAL: Verify the record is actually deleted from database
+    const verifyDeleted = await MemberUniform.findOne({ sispaId: normalizedSispaId });
+    if (verifyDeleted) {
+      console.error(`❌ CRITICAL: Uniform data still exists after deletion! SISPA ID: "${normalizedSispaId}" - This should NOT happen with deleteOne()`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete uniform data - deletion did not complete' 
+      });
+    }
+
+    // Also verify with case-insensitive search
+    const verifyDeletedCaseInsensitive = await MemberUniform.findOne({ 
+      sispaId: { $regex: new RegExp(`^${normalizedSispaId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+    });
+    if (verifyDeletedCaseInsensitive) {
+      console.error(`❌ CRITICAL: Uniform data still exists after deletion (case-insensitive)! SISPA ID: "${normalizedSispaId}" - This should NOT happen with deleteOne()`);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete uniform data - deletion did not complete' 
+      });
+    }
+
+    console.log(`✅ Successfully PERMANENTLY DELETED member uniform from database: SISPA ID "${normalizedSispaId}" - Record no longer exists in database`);
+
+    res.status(200).json({ 
+      success: true, 
+      message: 'Uniform data permanently deleted from database',
+      deletedCount: result.deletedCount
+    });
+  } catch (error: any) {
+    console.error('❌ Error deleting member uniform:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to delete uniform data',
       error: error.message 
     });
   }
@@ -2201,8 +3187,8 @@ export const getMemberUniform = async (req: AuthRequest, res: Response) => {
     
     console.log('Items breakdown (by normalized category):', itemsByCategory);
 
-    // Format items to include status fields
-    const formattedItems = formatUniformItemsWithStatus(
+    // Format items to include status fields (with prices for shirts)
+    const formattedItems = await formatUniformItemsWithStatus(
       uniform.items,
       uniform.createdAt,
       uniform.updatedAt
@@ -2380,8 +3366,16 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
     
     // Helper function to create a unique key for item comparison
     const getItemKey = (item: any): string => {
-      const size = item.size ? String(item.size).trim() : 'NO_SIZE';
-      return `${String(item.category).trim().toLowerCase()}::${String(item.type).trim().toLowerCase()}::${size.toLowerCase()}`;
+      // CRITICAL FIX: Handle "N/A" for accessories - treat it the same as empty/null
+      // Applies to: Accessories No 3, Accessories No 4, and all items with "N/A" size
+      let size: string;
+      if (!item.size || item.size === '' || item.size === null || item.size === undefined || 
+          item.size === 'N/A' || String(item.size).toLowerCase() === 'n/a') {
+        size = 'NO_SIZE';
+      } else {
+        size = String(item.size).trim().toLowerCase();
+      }
+      return `${String(item.category).trim().toLowerCase()}::${String(item.type).trim().toLowerCase()}::${size}`;
     };
     
     // STRICT: Validate categories FIRST before normalization
@@ -2443,6 +3437,25 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
           success: false,
           message: `Invalid category "${item.category}". Use "Shirt" instead of "T-Shirt".`
         });
+      }
+      
+      // Validate size: Only require size when item needs size AND status is "Available"
+      // This allows users to mark items "Missing" or "Not Available" without picking a size
+      const status = (item.status || 'Available').trim();
+      const needsSize = requiresSize(item.category, item.type);
+      const hasValidSize = item.size && item.size !== '' && item.size !== null && item.size !== undefined && item.size !== 'N/A';
+      
+      // ✅ Only enforce size when Available AND needsSize
+      if (needsSize && status === 'Available' && !hasValidSize) {
+        return res.status(400).json({
+          success: false,
+          message: `Size is required for ${item.type} when status is Available`
+        });
+      }
+      
+      // ✅ If not available, allow size to be null/empty
+      if (status !== 'Available') {
+        item.size = item.size && String(item.size).trim() !== '' ? item.size : null;
       }
     }
 
@@ -2871,8 +3884,8 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
       ? 'Uniform collection created successfully'
       : `Uniform items added successfully. ${itemsToDeduct.length} new items added.`;
 
-    // Format items with status fields for response
-    const formattedItems = formatUniformItemsWithStatus(
+    // Format items with status fields for response (with prices for shirts)
+    const formattedItems = await formatUniformItemsWithStatus(
       savedUniform.items,
       savedUniform.createdAt,
       savedUniform.updatedAt
@@ -2998,6 +4011,8 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
   // Declare variables outside try block so they're accessible in catch block
   let normalizedItems: any[] = [];
   let validatedItems: any[] = [];
+  let restoredItems: any[] = [];
+  let inventoryUpdates: any[] = [];
 
   try {
     if (!req.user || !req.user.sispaId) {
@@ -3168,19 +4183,25 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           });
         }
         
-        // Validate size: Main items (like "Beret", "Uniform No 3 Male") require a size
-        // Accessories don't require sizes (size can be empty string)
-        const isAccessory = isAccessoryType(item.type);
+        // Validate size: Only require size when item needs size AND status is "Available"
+        // This allows users to mark items "Missing" or "Not Available" without picking a size
+        const status = (item.status || 'Available').trim();
         const needsSize = requiresSize(item.category, item.type);
         const hasValidSize = item.size && item.size !== '' && item.size !== null && item.size !== undefined && item.size !== 'N/A';
         
-        if (needsSize && !hasValidSize && !isAccessory) {
+        // ✅ Only enforce size when Available AND needsSize
+        if (needsSize && status === 'Available' && !hasValidSize) {
           await session.abortTransaction();
           session.endSession();
           return res.status(400).json({
             success: false,
-            message: `Item "${item.type}" in category "${item.category}" requires a size. Please provide a size for this item.`
+            message: `Size is required for ${item.type} when status is Available`
           });
+        }
+        
+        // ✅ If not available, allow size to be null/empty
+        if (status !== 'Available') {
+          item.size = item.size && String(item.size).trim() !== '' ? item.size : null;
         }
       }
     }
@@ -3217,12 +4238,67 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
     console.log(`📋 Existing uniform has ${oldItems.length} items (normalized: ${normalizedOldItems.length})`);
     console.log(`📋 New request has ${items.length} items (normalized: ${normalizedItems.length})`);
     
+    // CRITICAL: Detect if this is a single-item update (merge mode) vs full update (replace mode)
+    // If frontend sends only 1 item, it's a single-item update - we should MERGE, not REPLACE
+    // This means we should NOT restore inventory for items not in the request (they're being preserved)
+    const isSingleItemUpdate =
+      normalizedItems.length === 1 ||
+      req.body?.updateMode === 'merge' ||
+      req.query?.mode === 'merge';
+
+    const isFullUpdate = normalizedItems.length >= normalizedOldItems.length * 0.8; // If new items >= 80% of old items, assume full update
+    
+    console.log(`🔍 UPDATE MODE DETECTION:`, {
+      isSingleItemUpdate,
+      isFullUpdate,
+      oldItemsCount: normalizedOldItems.length,
+      newItemsCount: normalizedItems.length,
+      message: isSingleItemUpdate 
+        ? 'SINGLE ITEM UPDATE - Will merge with existing items (preserve others)' 
+        : isFullUpdate 
+        ? 'FULL UPDATE - Will replace all items' 
+        : 'PARTIAL UPDATE - Will merge with existing items (preserve others)'
+    });
+    
     // Helper function to create a key for item comparison (category + type + size)
+    // CRITICAL: Size normalization must match findInventoryItem logic:
+    // - Beret: EXACT match (no normalization, keep spaces)
+    // - PVC Shoes/Boot: Normalize UK prefix ("UK 7" → "7")
+    // - Other items: Normalize spaces and case
     const getItemKey = (item: any): string => {
       try {
-        const normalizedSize = item.size ? normalizeSize(item.size) : 'NO_SIZE';
         const normalizedCategory = (item.category || '').toLowerCase().trim();
         const normalizedType = normalizeTypeForMatching(item.type || '');
+        
+        // CRITICAL: Size normalization depends on item type (same as findInventoryItem)
+        // CRITICAL FIX: Handle "N/A" for accessories - treat it the same as empty/null
+        // This ensures Accessories No 3, Accessories No 4, and all items with "N/A" size match correctly
+        // Applies to: Accessories No 3 (Apulet, Integrity Badge, etc.), Accessories No 4 (APM Tag, Belt No 4, etc.)
+        let normalizedSize: string;
+        if (!item.size || item.size === '' || item.size === null || item.size === undefined || 
+            item.size === 'N/A' || String(item.size).toLowerCase() === 'n/a') {
+          normalizedSize = 'NO_SIZE';
+        } else {
+          const isBeret = normalizedType.toLowerCase() === 'beret';
+          const isShoeOrBoot = normalizedType.toLowerCase().includes('shoe') || 
+                               normalizedType.toLowerCase().includes('boot') ||
+                               normalizedType.toLowerCase() === 'pvc shoes';
+          
+          if (isBeret) {
+            // Beret: EXACT match - keep size as-is (with spaces)
+            // "6 3/4" must stay "6 3/4" (not "63/4")
+            normalizedSize = String(item.size).trim();
+          } else if (isShoeOrBoot) {
+            // PVC Shoes/Boot: Remove UK prefix for key matching
+            // "UK 7" → "7", "7" → "7"
+            normalizedSize = String(item.size).replace(/^UK\s*/i, '').trim();
+          } else {
+            // Other items: Normalize spaces and case
+            // CRITICAL: normalizeSize returns null for "N/A", so use 'NO_SIZE' as fallback
+            normalizedSize = normalizeSize(item.size) || 'NO_SIZE';
+          }
+        }
+        
         return `${normalizedCategory}::${normalizedType}::${normalizedSize}`;
       } catch (err) {
         console.error('Error creating item key:', err, item);
@@ -3270,9 +4346,96 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
       const oldQuantity = (oldItem.quantity !== undefined && oldItem.quantity !== null) ? oldItem.quantity : 1;
       const newQuantity = newItem ? ((newItem.quantity !== undefined && newItem.quantity !== null) ? newItem.quantity : 1) : 0;
       
-      // If item was removed or quantity decreased, restore the difference
-      if (!newItem || newQuantity < oldQuantity) {
+      // CRITICAL: Log item comparison for debugging
+      console.log(`🔍 Comparing for restore: ${oldItem.type} (${oldItem.size || 'no size'})`, {
+        key,
+        oldQuantity,
+        newQuantity,
+        newItemExists: !!newItem,
+        isSingleItemUpdate,
+        willRestore: (!isSingleItemUpdate && (!newItem || newQuantity < oldQuantity))
+      });
+      
+      // CRITICAL FIX: If this is a single-item update (merge mode), do NOT restore inventory
+      // for items not in the request - they're being preserved, not removed
+      // Only restore if this is a full update (replace mode) and item is actually missing/decreased
+      if (isSingleItemUpdate) {
+        // Single-item update: Only restore if the item being updated has quantity decreased
+        // Don't restore items that aren't in the request - they're being preserved
+        if (newItem && newQuantity < oldQuantity) {
+          // Item is in the request and quantity decreased - restore the difference
+          console.log(`📦 Single-item update: Item ${oldItem.type} (${oldItem.size || 'no size'}) quantity decreased from ${oldQuantity} to ${newQuantity} - will restore ${oldQuantity - newQuantity}`);
+        } else {
+          // ✅ Allow restore when this single-item update is actually a SIZE CHANGE
+          // old key missing (old size), but same category+type exists in request with different size
+          let isSizeChange = false;
+
+          if (!newItem && requiresSize(oldItem.category, oldItem.type)) {
+            const oldCat = (oldItem.category || '').toLowerCase().trim();
+            const oldType = normalizeTypeForMatching(oldItem.type || '');
+
+            for (const candidate of newItemMap.values()) {
+              const newCat = (candidate.category || '').toLowerCase().trim();
+              const newType = normalizeTypeForMatching(candidate.type || '');
+
+              if (oldCat === newCat && oldType === newType) {
+                isSizeChange = true;
+                break;
+              }
+            }
+          }
+
+          if (!isSizeChange) {
+            console.log(`⏭️  Single-item update: Skipping restore for ${oldItem.type} (${oldItem.size || 'no size'}) - preserved`);
+            continue;
+          }
+
+          console.log(`🔄 Single-item SIZE CHANGE detected: restoring old size for ${oldItem.type} (${oldItem.size || 'no size'})`);
+        }
+      }
+      // Check if this is a size change (same category/type but different size)
+      // For size changes, we need to check if there's a new item with same category/type but different size
+      let isSizeChangeForRestore = false;
+      if (!newItem && requiresSize(oldItem.category, oldItem.type)) {
+        const oldCat = (oldItem.category || '').toLowerCase().trim();
+        const oldType = normalizeTypeForMatching(oldItem.type || '');
+
+        for (const candidate of newItemMap.values()) {
+          const newCat = (candidate.category || '').toLowerCase().trim();
+          const newType = normalizeTypeForMatching(candidate.type || '');
+          const candidateStatus = (candidate.status || 'Available').trim();
+
+          if (oldCat === newCat && oldType === newType && candidateStatus === 'Available') {
+            // Same category/type but different size (different key means different size)
+            // New item is "Available" so we should restore old size if old was also "Available"
+            isSizeChangeForRestore = true;
+            break;
+          }
+        }
+      }
+
+      // CRITICAL: Only restore if old item was "Available" status
+      // If status changed to "Missing" or "Not Available", do NOT restore
+      // For size changes with "Available" status, restore old size
+      const oldItemStatus = oldItem.status || 'Available';
+      const shouldRestore = oldItemStatus === 'Available' && (!newItem || newQuantity < oldQuantity || isSizeChangeForRestore);
+
+      //Status becoming "Not Available" / "Missing" will NOT restore inventory anymore.
+      if (shouldRestore) {
         const restoreAmount = !newItem ? oldQuantity : (oldQuantity - newQuantity);
+
+        // CRITICAL: Log specifically for accessories
+        const isAccessoryRestore = isAccessoryType(oldItem.type) || oldItem.category?.toLowerCase().includes('accessories');
+        if (isAccessoryRestore) {
+          console.log(`   ⚠️ ACCESSORY RESTORE DEBUG: ${oldItem.type} - Old Qty: ${oldQuantity}, New Qty: ${newQuantity}, Restore Amount: ${restoreAmount}`);
+          console.log(`   ⚠️ ACCESSORY DEBUG: Will restore ${restoreAmount} to inventory (item removed/decreased or status changed to Not Available)`);
+        }
+        
+        // Log size change restore
+        if (isSizeChangeForRestore) {
+          console.log(`🔄 SIZE CHANGE RESTORE: Restoring old size "${oldItem.size || 'no size'}" for ${oldItem.type} - Old status: "${oldItemStatus}"`);
+        }
+
         
         // Validate restore amount
         if (restoreAmount <= 0) {
@@ -3287,6 +4450,14 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           continue;
         }
         
+        // CRITICAL: Log before finding inventory item
+        console.log(`🔎 Finding inventory item to restore:`, {
+          category: oldItem.category,
+          type: oldItem.type,
+          size: oldItem.size || 'no size',
+          restoreAmount: restoreAmount
+        });
+        
         const inventoryItem = await findInventoryItem(
           oldItem.category,
           oldItem.type,
@@ -3295,15 +4466,146 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
         );
         
         if (inventoryItem) {
+          // CRITICAL: Verify we found the CORRECT inventory item by checking category, type, and size match
+          // This prevents restoring to wrong items in the same category
+          const inventoryCategory = inventoryItem.category ? String(inventoryItem.category).trim() : '';
+          const inventoryType = inventoryItem.type ? String(inventoryItem.type).trim() : '';
+          const inventorySize = inventoryItem.size ? String(inventoryItem.size).trim() : '';
+          const oldItemCategory = oldItem.category ? String(oldItem.category).trim() : '';
+          const oldItemType = oldItem.type ? String(oldItem.type).trim() : '';
+          const oldItemSize = oldItem.size ? String(oldItem.size).trim() : '';
+          
+          // CRITICAL: Verify category and type match exactly (case-insensitive)
+          // This is ESPECIALLY important for accessories with "N/A" size - type must match exactly
+          const categoryMatch = inventoryCategory.toLowerCase() === oldItemCategory.toLowerCase();
+          const normalizedInventoryType = normalizeTypeName(inventoryItem.category || '', inventoryItem.type || '');
+          const normalizedOldItemType = normalizeTypeName(oldItem.category || '', oldItem.type || '');
+          
+          // CRITICAL: For accessories, type must match EXACTLY (case-insensitive)
+          // Don't use "contains" matching - must be exact to prevent wrong item restore
+          const typeMatchExact = normalizedInventoryType.toLowerCase() === normalizedOldItemType.toLowerCase();
+          const typeMatchOriginal = inventoryType.toLowerCase() === oldItemType.toLowerCase();
+          const typeMatch = typeMatchExact || typeMatchOriginal;
+          
+          if (!categoryMatch || !typeMatch) {
+            console.error(`❌ CRITICAL: Category/Type mismatch for restore!`, {
+              oldItem: { category: oldItemCategory, type: oldItemType, size: oldItemSize },
+              inventoryItem: { category: inventoryCategory, type: inventoryType, size: inventorySize },
+              normalizedTypes: { old: normalizedOldItemType, inventory: normalizedInventoryType },
+              typeMatchExact: typeMatchExact,
+              typeMatchOriginal: typeMatchOriginal,
+              message: 'Category or type mismatch - skipping restore to prevent wrong item deduction'
+            });
+            continue; // Skip restore to prevent wrong item
+          }
+          
+          // CRITICAL: Additional verification for accessories - log the match to help debug
+          if (oldItemCategory.toLowerCase().includes('accessories')) {
+            console.log(`✅ Type match verified for accessory restore: "${oldItemType}" → "${inventoryType}" (normalized: "${normalizedOldItemType}" → "${normalizedInventoryType}")`);
+          }
+          
+          // CRITICAL: Verify we found the correct inventory item by checking size match
+          // This prevents restoring to wrong size (e.g., restoring "6 3/4" to "6 5/8")
+          // For Beret, sizes must match exactly
+          const isBeret = oldItem.type?.toLowerCase() === 'beret';
+          if (isBeret && inventorySize !== oldItemSize) {
+            console.error(`❌ CRITICAL: Size mismatch for Beret restore!`, {
+              oldItemSize: oldItemSize,
+              inventorySize: inventorySize,
+              type: oldItem.type,
+              message: 'Beret sizes must match exactly - skipping restore to prevent wrong size deduction'
+            });
+            continue; // Skip restore to prevent wrong size
+          }
+          
+          // For PVC Shoes/Boot, allow UK prefix variations but verify numeric part matches
+          const isShoeOrBoot = oldItem.type?.toLowerCase().includes('shoe') || 
+                               oldItem.type?.toLowerCase().includes('boot');
+          if (isShoeOrBoot) {
+            const inventorySizeNoUK = inventorySize.replace(/^UK\s*/i, '').trim();
+            const oldItemSizeNoUK = oldItemSize.replace(/^UK\s*/i, '').trim();
+            if (inventorySizeNoUK !== oldItemSizeNoUK && inventorySize !== oldItemSize) {
+              console.error(`❌ CRITICAL: Size mismatch for Shoe/Boot restore!`, {
+                oldItemSize: oldItemSize,
+                inventorySize: inventorySize,
+                oldItemSizeNoUK: oldItemSizeNoUK,
+                inventorySizeNoUK: inventorySizeNoUK,
+                type: oldItem.type,
+                message: 'Size mismatch - skipping restore to prevent wrong size deduction'
+              });
+              continue; // Skip restore to prevent wrong size
+            }
+          } else {
+            // For all other items (Uniform No 3 Male/Female, Uniform No 4, Shirt, Accessories with "N/A", etc.):
+            // Handle items with no size (Accessories No 3, Accessories No 4)
+            if (!inventorySize && !oldItemSize) {
+              // Both are empty/null - size matches ✅
+              // CRITICAL: For accessories with empty size, TYPE must match EXACTLY
+              // Type match was already verified above, so if we reach here, type matches ✅
+              // Continue to allow restore - but log to verify
+              console.log(`✅ Size match for empty items: Both are empty - Type verified: "${oldItemType}" matches "${inventoryType}"`);
+            } else if (!inventorySize || !oldItemSize) {
+              // One is empty, one is not - no match ❌
+              console.error(`❌ CRITICAL: Size mismatch for item restore!`, {
+                oldItemSize: oldItemSize,
+                inventorySize: inventorySize,
+                type: oldItem.type,
+                message: 'One item has size, one doesn\'t - skipping restore to prevent wrong size deduction'
+              });
+              continue; // Skip restore to prevent wrong size
+            } else {
+              // Both have sizes - normalize and compare
+              // Handle "N/A" case for accessories
+              const inventorySizeIsNA = inventorySize === 'N/A' || inventorySize.toLowerCase() === 'n/a';
+              const oldItemSizeIsNA = oldItemSize === 'N/A' || oldItemSize.toLowerCase() === 'n/a';
+              
+              if (inventorySizeIsNA && oldItemSizeIsNA) {
+                // Both are "N/A" - size matches ✅
+                // CRITICAL: For accessories with "N/A" size, we MUST verify TYPE matches exactly
+                // This prevents restoring to wrong item (e.g., restoring "Beret Logo Pin" to "Belt No 3")
+                // Type match was already verified above, so if we reach here, type matches ✅
+                // Continue to allow restore
+              } else if (inventorySizeIsNA || oldItemSizeIsNA) {
+                // One is "N/A", one is not - no match ❌
+                console.error(`❌ CRITICAL: Size mismatch for item restore!`, {
+                  oldItemSize: oldItemSize,
+                  inventorySize: inventorySize,
+                  type: oldItem.type,
+                  message: 'One item has "N/A", one has actual size - skipping restore to prevent wrong size deduction'
+                });
+                continue; // Skip restore to prevent wrong size
+              } else {
+                // Both have actual sizes - normalize and compare
+                const normalizedInventorySize = normalizeSize(inventorySize);
+                const normalizedOldItemSize = normalizeSize(oldItemSize);
+                if (normalizedInventorySize !== normalizedOldItemSize && inventorySize !== oldItemSize) {
+                  console.error(`❌ CRITICAL: Size mismatch for item restore!`, {
+                    oldItemSize: oldItemSize,
+                    inventorySize: inventorySize,
+                    normalizedOldItemSize: normalizedOldItemSize,
+                    normalizedInventorySize: normalizedInventorySize,
+                    type: oldItem.type,
+                    message: 'Size mismatch - skipping restore to prevent wrong size deduction'
+                  });
+                  continue; // Skip restore to prevent wrong size
+                }
+              }
+            }
+          }
+          
+          // All checks passed - this is the correct item to restore
           inventoryRestores.push({
             item: oldItem,
             inventoryId: String(inventoryItem._id),
             restore: restoreAmount
           });
-          console.log(`📦 Will restore ${restoreAmount} to inventory: ${oldItem.type} (${oldItem.size || 'no size'})`);
+          console.log(`📦 Will restore ${restoreAmount} to inventory: ${oldItem.type} (${oldItem.size || 'no size'}) - Verified match: category="${inventoryCategory}", type="${inventoryType}", size="${inventorySize}", Current inventory quantity: ${inventoryItem.quantity}`);
         } else {
           console.warn(`⚠️  Could not find inventory item to restore: ${oldItem.type} (${oldItem.size || 'no size'}) - This item may have been removed from inventory`);
         }
+      } else {
+        // Item still exists with same or higher quantity - no restore needed
+        console.log(`⏭️  No restore needed: ${oldItem.type} (${oldItem.size || 'no size'}) - Old: ${oldQuantity}, New: ${newQuantity}`);
       }
     }
     
@@ -3358,12 +4660,17 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
       }
       
       // CRITICAL: Skip inventory deduction if status is "Not Available" or "Missing"
+      // ONLY deduct when status is "Available" (or undefined/null, which defaults to "Available")
+      // CRITICAL: This applies to ALL items including accessories (same logic as Uniform No 3)
       const itemStatus = newItem.status || 'Available';
       const shouldSkipDeduction = itemStatus === 'Not Available' || itemStatus === 'Missing';
       
+      
+      
       if (shouldSkipDeduction) {
-        console.log(`⏭️  Skipping inventory deduction for item with status "${itemStatus}": ${newItem.type} (${newItem.size || 'no size'})`);
+        console.log(`⏭️  Skipping inventory deduction for item with status "${itemStatus}": ${newItem.type} (${newItem.size || 'no size'}) - Inventory will NOT be changed`);
         // Still save the item, just don't deduct inventory
+        continue; // Skip to next item - don't add to inventoryUpdates
       } else if (!oldItem || isSizeChange || newQuantity > oldQuantity) {
         // Deduct if this is a new item (not in old), size change, OR if quantity increased
         const netIncrease = !oldItem || isSizeChange ? newQuantity : (newQuantity - oldQuantity);
@@ -3406,10 +4713,26 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
         // So we check the TYPE, not just the category - this is the key fix!
         const isAccessoryTypeItem = isAccessoryType(newItem.type);
         const isAccessoryCategory = newItem.category?.toLowerCase().trim().includes('accessories');
-        const isAccessory = isAccessoryTypeItem || isAccessoryCategory; // Item is accessory if TYPE is accessory OR category is Accessories
+        // CRITICAL: Shirts are NOT accessories - they require sizes and should deduct inventory like Uniform No 3 Female
+        const isShirtCategory = newItem.category?.toLowerCase().trim() === 'shirt' || newItem.category?.toLowerCase().trim() === 't-shirt';
+        const isAccessory = (isAccessoryTypeItem || isAccessoryCategory) && !isShirtCategory; // Item is accessory if TYPE is accessory OR category is Accessories, BUT NOT if it's a shirt
         
         console.log(`🔎 Searching for inventory item: category="${newItem.category}", type="${newItem.type}", size="${newItem.size || 'EMPTY/NULL'}"`);
-        console.log(`   isAccessoryTypeItem: ${isAccessoryTypeItem}, isAccessoryCategory: ${isAccessoryCategory}, isAccessory: ${isAccessory}`);
+        console.log(`   isAccessoryTypeItem: ${isAccessoryTypeItem}, isAccessoryCategory: ${isAccessoryCategory}, isShirtCategory: ${isShirtCategory}, isAccessory: ${isAccessory}`);
+        
+        // CRITICAL: Log specifically for Shirt items (should deduct like Uniform No 3 Female)
+        if (isShirtCategory) {
+          console.log(`   ⚠️ SHIRT DEBUG: category="${newItem.category}", type="${newItem.type}", size="${newItem.size || 'EMPTY/NULL'}", status="${newItem.status || 'Available'}"`);
+          console.log(`   ⚠️ SHIRT DEBUG: Shirts require sizes and should deduct inventory when status is "Available" (same logic as Uniform No 3 Female)`);
+        }
+        
+        // CRITICAL: Log specifically for Accessories No 4 items (APM Tag, Belt No 4)
+        if (newItem.category?.toLowerCase().includes('accessories no 4') || 
+            newItem.category?.toLowerCase().includes('no 4') ||
+            newItem.type?.toLowerCase().includes('apm tag') ||
+            newItem.type?.toLowerCase().includes('belt no 4')) {
+          console.log(`   ⚠️ ACCESSORIES NO 4 DEBUG: category="${newItem.category}", type="${newItem.type}", size="${newItem.size || 'EMPTY/NULL'}" - Will search with same logic as Accessories No 3`);
+        }
         
         let inventoryItem;
         try {
@@ -3470,8 +4793,11 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
               if (!catLower.includes('uniform no 3')) categoriesToTry.push('Uniform No 3');
             } else if (accessoryTypesNo4.some(acc => typeLower.includes(acc)) || catLower.includes('no 4')) {
               // Try both "Accessories No 4" and "Uniform No 4"
+              // CRITICAL: Same logic as Accessories No 3 - try both categories for backward compatibility
+              console.log(`🔄 Strategy 3: Detected Accessories No 4 item - type="${newItem.type}", category="${newItem.category}"`);
               if (!catLower.includes('accessories no 4')) categoriesToTry.push('Accessories No 4');
               if (!catLower.includes('uniform no 4')) categoriesToTry.push('Uniform No 4');
+              console.log(`🔄 Strategy 3: Will try categories: ${categoriesToTry.join(', ')}`);
             }
             
             // Try each category until we find the item
@@ -3501,13 +4827,18 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           console.error(`❌ Error searching for inventory item: ${newItem.category} / ${newItem.type} / ${newItem.size}`, inventoryError);
           
           // For accessories, continue (non-blocking) - allow saving even if inventory search fails
-          if (isAccessory) {
+          // CRITICAL: Shirts are NOT accessories - they should throw error like Uniform No 3 Female
+          if (isAccessory && !isShirtCategory) {
             console.log(`⏭️  Error searching inventory for accessory (non-blocking): ${newItem.type} - Continuing without inventory deduction`);
             inventoryItem = null; // Set to null so we skip deduction
           } else {
-            // For main items, this is a serious error - re-throw (will be caught by outer catch)
-            console.error(`❌ CRITICAL: Error searching inventory for main item - aborting transaction`);
-            throw inventoryError; // Re-throw for main items
+            // For main items (including shirts), this is a serious error - re-throw (will be caught by outer catch)
+            if (isShirtCategory) {
+              console.error(`❌ CRITICAL: Error searching inventory for SHIRT item - aborting transaction (shirts require inventory deduction like Uniform No 3 Female)`);
+            } else {
+              console.error(`❌ CRITICAL: Error searching inventory for main item - aborting transaction`);
+            }
+            throw inventoryError; // Re-throw for main items (including shirts)
           }
         }
         
@@ -3517,18 +4848,31 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           console.warn(`⚠️  Inventory item NOT found for: ${newItem.category} / ${newItem.type} / ${newItem.size || 'EMPTY/NULL'}`);
           
           // For accessories, allow saving without inventory check (non-blocking)
-          if (isAccessory) {
+          // CRITICAL: Shirts are NOT accessories - they should require inventory like Uniform No 3 Female
+          if (isAccessory && !isShirtCategory) {
             console.log(`⏭️  Skipping inventory deduction for accessory (inventory not found but allowing save): ${newItem.category} / ${newItem.type}`);
             continue; // Skip inventory deduction for this accessory but allow uniform to save
+          }
+          
+          // For shirts, log specific error (should NOT skip like accessories)
+          if (isShirtCategory) {
+            console.error(`❌ CRITICAL: Inventory item NOT found for SHIRT: ${newItem.category} / ${newItem.type} / ${newItem.size || 'EMPTY/NULL'}`);
+            console.error(`   ⚠️ SHIRT DEBUG: Shirts require inventory deduction (same as Uniform No 3 Female) - Cannot proceed without inventory item`);
           }
         }
 
         // If inventory item still not found after all retries
         // Note: Accessories should have already been skipped with 'continue' above
+        // CRITICAL: Shirts are main items and should NOT be skipped
         if (!inventoryItem) {
-          // This should only happen for main items (non-accessories) at this point
+          // This should only happen for main items (non-accessories, including shirts) at this point
           // because accessories are skipped above with 'continue'
-          console.error(`❌ CRITICAL: Inventory item NOT found for main item: ${newItem.category} / ${newItem.type}`);
+          if (isShirtCategory) {
+            console.error(`❌ CRITICAL: Inventory item NOT found for SHIRT (main item): ${newItem.category} / ${newItem.type} / ${newItem.size || 'EMPTY/NULL'}`);
+            console.error(`   ⚠️ SHIRT DEBUG: Shirts must have inventory items with matching size - Cannot save without inventory`);
+          } else {
+            console.error(`❌ CRITICAL: Inventory item NOT found for main item: ${newItem.category} / ${newItem.type}`);
+          }
           
           await session.abortTransaction();
           session.endSession();
@@ -3536,29 +4880,31 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           // Get available sizes for better error message
           try {
             const normalizedCategoryForSearch = normalizeCategoryForStorage(newItem.category, newItem.type);
-          const allItems = await UniformInventory.find({
+            const allItems = await UniformInventory.find({
               $or: [
                 { category: { $regex: new RegExp(`^${newItem.category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
                 // Also try normalized category
                 { category: { $regex: new RegExp(`^${normalizedCategoryForSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
               ],
-            type: { $regex: new RegExp(`^${newItem.type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-          }).limit(10);
-          
-          const availableSizes = allItems.map(i => i.size).filter(s => s).join(', ') || 'none';
+              type: { $regex: new RegExp(`^${newItem.type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+            })
+              .limit(50) // Limit for error logging queries
+              .lean();
+            
+            const availableSizes = allItems.map((i: any) => i.size).filter((s: any) => s).join(', ') || 'none';
             const sizeText = newItem.size ? ` size "${newItem.size}"` : ' (no size)';
-          
+            
             console.error('❌ Item not found in inventory (main item):', {
-            searched: { category: newItem.category, type: newItem.type, size: newItem.size },
+              searched: { category: newItem.category, type: newItem.type, size: newItem.size },
               normalizedCategory: normalizedCategoryForSearch,
-              available: allItems.map(i => ({ size: i.size, quantity: i.quantity, category: i.category, type: i.type }))
-          });
-          
-          return res.status(400).json({ 
-            success: false, 
-            message: `Item "${newItem.type}"${sizeText} is not available in inventory. Available sizes: ${availableSizes || 'none'}. Please contact administrator.`,
-            searchedSize: newItem.size,
-              availableSizes: allItems.map(i => i.size).filter(Boolean),
+              available: allItems.map((i: any) => ({ size: i.size, quantity: i.quantity, category: i.category, type: i.type }))
+            });
+            
+            return res.status(400).json({ 
+              success: false, 
+              message: `Item "${newItem.type}"${sizeText} is not available in inventory. Available sizes: ${availableSizes || 'none'}. Please contact administrator.`,
+              searchedSize: newItem.size,
+              availableSizes: allItems.map((i: any) => i.size).filter(Boolean),
               searchedCategory: newItem.category,
               searchedType: newItem.type
             });
@@ -3568,12 +4914,12 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
               success: false,
               message: `Item "${newItem.type}" is not available in inventory. Please contact administrator.`,
               error: findError.message
-          });
+            });
           }
         }
 
         // Check if sufficient quantity available for the net increase
-        if (inventoryItem.quantity < netIncrease) {
+        if (inventoryItem && inventoryItem.quantity < netIncrease) {
           await session.abortTransaction();
           session.endSession();
           const sizeText = normalizedSize ? ` size ${normalizedSize}` : '';
@@ -3583,14 +4929,39 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           });
         }
 
-        inventoryUpdates.push({
-          item: newItem,
-          inventoryId: String(inventoryItem._id),
-          currentQuantity: inventoryItem.quantity,
-          deduction: netIncrease
-        });
-        
-        console.log(`📉 Will deduct ${netIncrease} (net increase) from inventory: ${newItem.type} (${newItem.size || 'no size'})`);
+        if (inventoryItem) {
+          // CRITICAL: Ensure netIncrease is positive (we're deducting, so it should be positive)
+          if (netIncrease <= 0) {
+            // CRITICAL: For shirts, log specific warning (should deduct like Uniform No 3 Female)
+            if (isShirtCategory) {
+              console.warn(`⚠️  WARNING: netIncrease is ${netIncrease} (should be positive) for SHIRT ${newItem.type} (${newItem.size || 'no size'}) - Status: ${newItem.status || 'Available'}`);
+              console.warn(`   ⚠️ SHIRT DEBUG: If status is "Available", netIncrease should be positive. Check if item already exists or status is wrong.`);
+            } else {
+              console.warn(`⚠️  WARNING: netIncrease is ${netIncrease} (should be positive) for ${newItem.type} (${newItem.size || 'no size'}) - Skipping deduction`);
+            }
+            continue; // Skip this item - don't add to inventoryUpdates
+          }
+          
+          // CRITICAL: Log specifically for shirts (should deduct like Uniform No 3 Female)
+          if (isShirtCategory) {
+            console.log(`📉 SHIRT DEDUCTION: Will deduct ${netIncrease} from inventory for ${newItem.type} (${newItem.size || 'no size'}) - Status: ${newItem.status || 'Available'}, Current stock: ${inventoryItem.quantity}`);
+          }
+          
+          // CRITICAL: Log specifically for accessories (should deduct like Uniform No 3 when status is Available)
+          if (isAccessory) {
+            console.log(`📉 ACCESSORY DEDUCTION: Will deduct ${netIncrease} from inventory for ${newItem.type} (${newItem.size || 'no size'}) - Status: ${newItem.status || 'Available'}, Current stock: ${inventoryItem.quantity}`);
+            console.log(`   ⚠️ ACCESSORY DEBUG: Accessories should deduct inventory when status is "Available" (same logic as Uniform No 3)`);
+          }
+          
+          inventoryUpdates.push({
+            item: newItem,
+            inventoryId: String(inventoryItem._id),
+            currentQuantity: inventoryItem.quantity,
+            deduction: netIncrease
+          });
+          
+          console.log(`📉 Will DEDUCT ${netIncrease} (net increase) from inventory: ${newItem.type} (${newItem.size || 'no size'}) - Current: ${inventoryItem.quantity}, After deduction: ${inventoryItem.quantity - netIncrease}`);
+        }
       } else {
         // Item exists with same quantity and no size change - skip deduction
         console.log(`⏭️  Skipping deduction for existing item (no change): ${newItem.type} (${newItem.size || 'no size'}) - Old Qty: ${oldQuantity}, New Qty: ${newQuantity}`);
@@ -3600,44 +4971,270 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
     console.log(`📊 Deduction summary: ${inventoryUpdates.length} items to deduct`);
 
     // Step 3: First, restore inventory for removed/changed items
+    // Track restored items for frontend response
+    const restoredItems: Array<{
+      category: string;
+      type: string;
+      size: string | null;
+      quantityRestored: number;
+      oldInventoryQuantity: number;
+      newInventoryQuantity: number;
+    }> = [];
+    
     for (const restore of inventoryRestores) {
       const inventoryItem = await UniformInventory.findById(restore.inventoryId).session(session);
-      if (!inventoryItem) continue;
+      if (!inventoryItem) {
+        console.warn(`⚠️  Inventory item not found for restore ID: ${restore.inventoryId} - Skipping restore`);
+        continue;
+      }
       
-      const newQuantity = inventoryItem.quantity + restore.restore;
+      // CRITICAL: Double-check that this is still the correct item before restoring
+      // This prevents restoring to wrong items if IDs changed or items were modified
+      const inventoryCategory = inventoryItem.category ? String(inventoryItem.category).trim() : '';
+      const inventoryType = inventoryItem.type ? String(inventoryItem.type).trim() : '';
+      const inventorySize = inventoryItem.size ? String(inventoryItem.size).trim() : '';
+      const restoreCategory = restore.item.category ? String(restore.item.category).trim() : '';
+      const restoreType = restore.item.type ? String(restore.item.type).trim() : '';
+      const restoreSize = restore.item.size ? String(restore.item.size).trim() : '';
+      
+      // Verify category and type match (case-insensitive)
+      const categoryMatch = inventoryCategory.toLowerCase() === restoreCategory.toLowerCase();
+      const normalizedInventoryType = normalizeTypeName(inventoryItem.category || '', inventoryItem.type || '');
+      const normalizedRestoreType = normalizeTypeName(restore.item.category || '', restore.item.type || '');
+      const typeMatch = normalizedInventoryType.toLowerCase() === normalizedRestoreType.toLowerCase() ||
+                        inventoryType.toLowerCase() === restoreType.toLowerCase();
+      
+      if (!categoryMatch || !typeMatch) {
+        console.error(`❌ CRITICAL: Category/Type mismatch before restore! Skipping restore to prevent wrong item deduction.`, {
+          restoreItem: { category: restoreCategory, type: restoreType, size: restoreSize },
+          inventoryItem: { category: inventoryCategory, type: inventoryType, size: inventorySize },
+          normalizedTypes: { restore: normalizedRestoreType, inventory: normalizedInventoryType },
+          inventoryId: restore.inventoryId,
+          message: 'Category or type mismatch - item may have been modified or wrong ID'
+        });
+        continue; // Skip restore to prevent wrong item
+      }
+      
+      // CRITICAL: Verify size match (with type-specific normalization) for ALL item types
+      // This prevents restoring to wrong items in the same category
+      const normalizedType = normalizeTypeName(restore.item.category || '', restore.item.type || '');
+      const normalizedTypeLower = normalizedType.toLowerCase();
+      const isBeret = normalizedTypeLower === 'beret';
+      const isShoeOrBoot = normalizedTypeLower.includes('shoe') || 
+                           normalizedTypeLower.includes('boot') ||
+                           normalizedTypeLower === 'pvc shoes';
+      
+      let sizeMatch = false;
+      
+      // Handle items with no size (Accessories No 3, Accessories No 4)
+      if (!inventorySize && !restoreSize) {
+        // Both are empty/null - match
+        sizeMatch = true;
+      } else if (!inventorySize || !restoreSize) {
+        // One is empty, one is not - no match
+        sizeMatch = false;
+      } else if (isBeret) {
+        // Beret: EXACT match only (spaces must match)
+        sizeMatch = inventorySize === restoreSize;
+      } else if (isShoeOrBoot) {
+        // PVC Shoes/Boot: Allow UK prefix variations
+        const inventorySizeNoUK = inventorySize.replace(/^UK\s*/i, '').trim();
+        const restoreSizeNoUK = restoreSize.replace(/^UK\s*/i, '').trim();
+        sizeMatch = inventorySizeNoUK === restoreSizeNoUK || inventorySize === restoreSize;
+      } else {
+        // All other items (Uniform No 3 Male/Female, Uniform No 4, Shirt, Accessories with "N/A"):
+        // Normalize and compare, but also handle "N/A" case
+        const inventorySizeIsNA = inventorySize === 'N/A' || inventorySize.toLowerCase() === 'n/a';
+        const restoreSizeIsNA = restoreSize === 'N/A' || restoreSize.toLowerCase() === 'n/a';
+        
+        if (inventorySizeIsNA && restoreSizeIsNA) {
+          // Both are "N/A" - match
+          sizeMatch = true;
+        } else if (inventorySizeIsNA || restoreSizeIsNA) {
+          // One is "N/A", one is not - no match
+          sizeMatch = false;
+        } else {
+          // Both have actual sizes - normalize and compare
+          const normalizedInventorySize = normalizeSize(inventorySize);
+          const normalizedRestoreSize = normalizeSize(restoreSize);
+          sizeMatch = normalizedInventorySize === normalizedRestoreSize || inventorySize === restoreSize;
+        }
+      }
+      
+      if (!sizeMatch) {
+        console.error(`❌ CRITICAL: Size mismatch before restore! Skipping restore to prevent wrong item deduction.`, {
+          restoreItem: { category: restoreCategory, type: restoreType, size: restoreSize },
+          inventoryItem: { category: inventoryCategory, type: inventoryType, size: inventorySize },
+          inventoryId: restore.inventoryId,
+          message: 'Size mismatch - wrong item or item was modified'
+        });
+        continue; // Skip restore to prevent wrong item
+      }
+      
+      const oldQuantity = inventoryItem.quantity;
+      const newQuantity = oldQuantity + restore.restore;
       const newStatus = calculateStockStatus(newQuantity);
+      
+      // CRITICAL: Check if this is an accessory for specific logging
+      const isAccessoryRestore = isAccessoryType(restore.item.type) || restore.item.category?.toLowerCase().includes('accessories');
+      
+      // CRITICAL: Log before restore to verify correct calculation
+      console.log(`📦 RESTORING INVENTORY:`, {
+        category: restore.item.category,
+        type: restore.item.type,
+        size: restore.item.size || 'no size',
+        isAccessory: isAccessoryRestore,
+        inventoryId: restore.inventoryId,
+        verified: { category: inventoryCategory, type: inventoryType, size: inventorySize },
+        oldQuantity: oldQuantity,
+        restoreAmount: restore.restore,
+        newQuantity: newQuantity,
+        calculation: `${oldQuantity} + ${restore.restore} = ${newQuantity}`
+      });
+      
+      // CRITICAL: Log specifically for accessories
+      if (isAccessoryRestore) {
+        console.log(`   ⚠️ ACCESSORY RESTORE: Restoring ${restore.restore} to ${restore.item.type} - Old: ${oldQuantity}, New: ${newQuantity}`);
+        console.log(`   ⚠️ ACCESSORY DEBUG: Using $inc with POSITIVE value (+${restore.restore}) to ADD (restore), not subtract`);
+      }
       
       await UniformInventory.findByIdAndUpdate(
         restore.inventoryId,
         { 
-          $inc: { quantity: restore.restore },
+          $inc: { quantity: restore.restore }, // Positive value to ADD (restore)
           status: newStatus
         },
         { session }
       );
       
-      console.log(`✅ Restored ${restore.restore} to inventory: ${restore.item.type} (${restore.item.size || 'no size'}) - New quantity: ${newQuantity}, Status: ${newStatus}`);
+      // Track restored item for frontend response
+      restoredItems.push({
+        category: restore.item.category,
+        type: restore.item.type,
+        size: restore.item.size || null,
+        quantityRestored: restore.restore,
+        oldInventoryQuantity: oldQuantity,
+        newInventoryQuantity: newQuantity
+      });
+      
+      // Verify the restore by reading back the quantity
+      const verifyItem = await UniformInventory.findById(restore.inventoryId).session(session);
+      if (verifyItem) {
+        const isAccessoryRestore = isAccessoryType(restore.item.type) || restore.item.category?.toLowerCase().includes('accessories');
+        
+        console.log(`✅ VERIFIED RESTORE: ${restore.item.type} (${restore.item.size || 'no size'}) - Was: ${oldQuantity}, Now: ${verifyItem.quantity}, Expected: ${newQuantity}, Status: ${verifyItem.status}`);
+        
+        // CRITICAL: Log specifically for accessories
+        if (isAccessoryRestore) {
+          console.log(`   ⚠️ ACCESSORY RESTORE VERIFICATION: ${restore.item.type} - Old: ${oldQuantity}, New: ${verifyItem.quantity}, Expected: ${newQuantity}`);
+          if (verifyItem.quantity === newQuantity) {
+            console.log(`   ✅ ACCESSORY RESTORE SUCCESS: Quantity correctly increased from ${oldQuantity} to ${verifyItem.quantity} (restore operation)`);
+          } else {
+            console.error(`   ❌ ACCESSORY RESTORE MISMATCH: Expected ${newQuantity}, got ${verifyItem.quantity}`);
+          }
+        }
+        
+        // Double-check the item is still correct
+        const verifyCategory = verifyItem.category ? String(verifyItem.category).trim() : '';
+        const verifyType = verifyItem.type ? String(verifyItem.type).trim() : '';
+        const verifySize = verifyItem.size ? String(verifyItem.size).trim() : '';
+        if (verifyCategory.toLowerCase() !== restoreCategory.toLowerCase() || 
+            verifyType.toLowerCase() !== restoreType.toLowerCase() ||
+            verifySize !== restoreSize) {
+          console.error(`❌ CRITICAL: Item mismatch after restore! Item was restored but details don't match.`, {
+            expected: { category: restoreCategory, type: restoreType, size: restoreSize },
+            actual: { category: verifyCategory, type: verifyType, size: verifySize }
+          });
+        }
+      }
     }
     
     // Step 4: Then, deduct inventory for new/changed items (all or nothing)
     for (const update of inventoryUpdates) {
       // Get current quantity to calculate new status
       const inventoryItem = await UniformInventory.findById(update.inventoryId).session(session);
-      if (!inventoryItem) continue;
+      if (!inventoryItem) {
+        console.warn(`⚠️  Inventory item not found for ID: ${update.inventoryId} - Skipping deduction`);
+        continue;
+      }
       
-      const newQuantity = inventoryItem.quantity - update.deduction;
+      // CRITICAL FIX: Ensure deduction is positive and quantity doesn't go below 0
+      const deductionAmount = Math.max(0, Math.abs(update.deduction)); // Ensure positive deduction
+      const oldQuantity = inventoryItem.quantity;
+      const newQuantity = Math.max(0, oldQuantity - deductionAmount); // Ensure doesn't go below 0
       const newStatus = calculateStockStatus(newQuantity);
       
+      // CRITICAL: Check if this is an accessory for specific logging
+      const isAccessoryItem = isAccessoryType(update.item.type) || update.item.category?.toLowerCase().includes('accessories');
+      
+      // CRITICAL: Log before deduction to verify correct calculation
+      console.log(`📉 DEDUCTING INVENTORY:`, {
+        category: update.item.category,
+        type: update.item.type,
+        size: update.item.size || 'no size',
+        status: update.item.status || 'Available',
+        isAccessory: isAccessoryItem,
+        oldQuantity: oldQuantity,
+        deductionAmount: deductionAmount,
+        newQuantity: newQuantity,
+        calculation: `${oldQuantity} - ${deductionAmount} = ${newQuantity}`
+      });
+      
+      // CRITICAL: Log specifically for accessories (should deduct like Uniform No 3)
+      if (isAccessoryItem) {
+        console.log(`   ⚠️ ACCESSORY DEDUCTION DEBUG: Deducting ${deductionAmount} from ${update.item.type} - Old: ${oldQuantity}, New: ${newQuantity}`);
+        console.log(`   ⚠️ ACCESSORY DEBUG: Using $inc with NEGATIVE value (-${deductionAmount}) to SUBTRACT, not ADD`);
+      }
+      
+      // CRITICAL FIX: Use explicit subtraction to ensure we DEDUCT, not ADD
+      // Using $inc with negative value: $inc: { quantity: -deductionAmount } will SUBTRACT
+      // CRITICAL: deductionAmount is POSITIVE, so -deductionAmount is NEGATIVE (which subtracts)
       await UniformInventory.findByIdAndUpdate(
         update.inventoryId,
         { 
-          $inc: { quantity: -update.deduction },
+          $inc: { quantity: -deductionAmount }, // CRITICAL: Negative value to SUBTRACT (not positive)
           status: newStatus
         },
         { session }
       );
       
-      console.log(`📉 Deducted ${update.deduction} from inventory: ${update.item.type} (${update.item.size || 'no size'}) - Remaining: ${newQuantity}, Status: ${newStatus}`);
+      // Verify the deduction by reading back the quantity
+      const verifyItem = await UniformInventory.findById(update.inventoryId).session(session);
+      if (verifyItem) {
+        const isAccessoryItem = isAccessoryType(update.item.type) || update.item.category?.toLowerCase().includes('accessories');
+        
+        console.log(`✅ VERIFIED DEDUCTION: ${update.item.type} (${update.item.size || 'no size'}) - Was: ${oldQuantity}, Now: ${verifyItem.quantity}, Expected: ${newQuantity}, Status: ${verifyItem.status}`);
+        
+        // CRITICAL: Log specifically for accessories
+        if (isAccessoryItem) {
+          console.log(`   ⚠️ ACCESSORY VERIFICATION: ${update.item.type} - Old: ${oldQuantity}, New: ${verifyItem.quantity}, Expected: ${newQuantity}`);
+          if (verifyItem.quantity === newQuantity) {
+            console.log(`   ✅ ACCESSORY DEDUCTION SUCCESS: Quantity correctly decreased from ${oldQuantity} to ${verifyItem.quantity}`);
+          } else {
+            console.error(`   ❌ ACCESSORY DEDUCTION MISMATCH: Expected ${newQuantity}, got ${verifyItem.quantity}`);
+          }
+        }
+        
+        // Double-check: if quantity increased instead of decreased, log error
+        if (verifyItem.quantity > oldQuantity) {
+          console.error(`❌ CRITICAL ERROR: Quantity INCREASED instead of DECREASED!`, {
+            item: `${update.item.type} (${update.item.size || 'no size'})`,
+            category: update.item.category,
+            isAccessory: isAccessoryItem,
+            oldQuantity: oldQuantity,
+            newQuantity: verifyItem.quantity,
+            expectedQuantity: newQuantity,
+            deductionAmount: deductionAmount,
+            message: 'This should NEVER happen - deduction should DECREASE quantity, not increase it'
+          });
+          
+          // CRITICAL: For accessories, this is especially important to log
+          if (isAccessoryItem) {
+            console.error(`   ❌ CRITICAL ACCESSORY ERROR: Accessory quantity INCREASED instead of DECREASED!`);
+            console.error(`   ❌ This means the deduction logic is WRONG for accessories - they should deduct like Uniform No 3`);
+          }
+        }
+      }
     }
 
     // Step 5: Save uniform collection
@@ -3670,9 +5267,9 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           ? item.status 
           : undefined, // Don't set status if not provided or invalid - schema will handle default
         // Handle missingCount: if status is Missing, default to 1 if not provided (will be incremented on merge if item exists)
-        missingCount: (item.status === 'Missing') 
-          ? (item.missingCount !== undefined && item.missingCount !== null ? Number(item.missingCount) : 1)
-          : undefined,
+        // CRITICAL: Don't set missingCount here for new items - let the merge logic handle it
+        // This ensures existing items' missingCount is preserved correctly
+        missingCount: item.status === "Missing" ? 1 : undefined,
         receivedDate: (item.status === 'Available' && item.receivedDate) 
           ? (item.receivedDate instanceof Date ? item.receivedDate : new Date(item.receivedDate))
           : undefined
@@ -3686,32 +5283,77 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
     let uniform = await MemberUniform.findOne({ sispaId: req.user.sispaId }).session(session);
 
     if (!uniform) {
-      // Create new collection if doesn't exist
       console.log(`📝 Creating NEW uniform collection for ${req.user.sispaId} with ${validatedItems.length} items`);
+    
+      const initialItems = validatedItems.map((it: any) => {
+        const status = (it.status || "Available").trim();
+        if (status === "Missing") {
+          return { ...it, missingCount: 1 };  // ✅ start Missing at 1
+        }
+        // do not send missingCount for non-missing; schema default stays 0
+        const { missingCount, ...rest } = it;
+        return rest;
+      });
+    
       uniform = new MemberUniform({
         sispaId: req.user.sispaId,
-        items: validatedItems
+        items: initialItems
       });
+    
+      // Validate before saving
+      const validationError = uniform.validateSync();
+      if (validationError) {
+        console.error('❌ Validation error before save (new uniform):', validationError);
+        const errorMessages = Object.values(validationError.errors || {}).map((e: any) => e.message).join(', ');
+        throw new Error(`Validation failed: ${errorMessages}`);
+      }
       
-        // Validate before saving
-        const validationError = uniform.validateSync();
-        if (validationError) {
-          console.error('❌ Validation error before save (new uniform):', validationError);
-          const errorMessages = Object.values(validationError.errors || {}).map((e: any) => e.message).join(', ');
-          throw new Error(`Validation failed: ${errorMessages}`);
-        }
-        
       await uniform.save({ session });
       console.log(`Created new uniform collection with ${validatedItems.length} items for ${req.user.sispaId} via PUT`);
     } else {
+      // =====================================================
+      // ✅ FIX 2: Heal existing uniforms (Missing but count = 0)
+      // =====================================================
+      if (uniform) {
+        let healed = false;
+
+        uniform.items = uniform.items.map((it: any) => {
+          const status = (it.status || "Available").trim();
+
+          if (status === "Missing") {
+            const mc = typeof it.missingCount === "number" ? it.missingCount : 0;
+            if (mc === 0) {
+              healed = true;
+              console.log(`🩹 Healing missingCount for ${it.category}/${it.type} → 1`);
+              return { ...it, missingCount: 1 };
+            }
+          }
+          return it;
+        });
+
+        if (healed) {
+          uniform.markModified("items");
+          await uniform.save({ session });
+          console.log(`✅ Existing uniform healed for ${req.user.sispaId}`);
+        }
+      }
       // FIXED: Merge items instead of replacing (frontend sends items one at a time OR all items at once)
       // CRITICAL: Always merge items with existing items - never replace all items
       // This ensures all previously saved items are preserved
       
       // Define getItemKey function for merging (use same logic for single and multiple items)
+      // CRITICAL FIX: Handle "N/A" for accessories - treat it the same as empty/null
+      // Applies to: Accessories No 3, Accessories No 4, and all items with "N/A" size
       const getItemKey = (item: any): string => {
         try {
-          const normalizedSize = item.size ? normalizeSize(item.size) : 'NO_SIZE';
+          let normalizedSize: string;
+          if (!item.size || item.size === '' || item.size === null || item.size === undefined || 
+              item.size === 'N/A' || String(item.size).toLowerCase() === 'n/a') {
+            normalizedSize = 'NO_SIZE';
+          } else {
+            // normalizeSize returns null for "N/A", so use 'NO_SIZE' as fallback
+            normalizedSize = normalizeSize(item.size) || 'NO_SIZE';
+          }
           const normalizedCategory = (item.category || '').toLowerCase().trim();
           const normalizedType = normalizeTypeForMatching(item.type || '');
           return `${normalizedCategory}::${normalizedType}::${normalizedSize}`;
@@ -3753,42 +5395,176 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
         });
         
           if (existingItemIndex >= 0) {
+            console.log(`\n🔵 ===== FOUND EXISTING ITEM - WILL UPDATE =====`);
+            console.log(`Item: ${newItem.type} (${newItem.size || 'no size'})`);
+            console.log(`Existing item index: ${existingItemIndex}`);
+            
             // Update existing item (preserve status if not provided in new item)
             const existingItem = uniform.items[existingItemIndex];
-            const existingStatus = existingItem.status || 'Available';
-            const newStatus = newItem.status !== undefined ? newItem.status : existingStatus;
+            // CRITICAL: Convert Mongoose subdocument to plain object to access all fields reliably
+            // This ensures we can read missingCount even if it's not directly accessible on the document
+            const existingItemObj = (existingItem as any).toObject ? (existingItem as any).toObject() : existingItem;
+            const existingStatus = (existingItemObj.status || existingItem.status || 'Available');
+            const newStatus = newItem.status !== undefined ? String(newItem.status).trim() : existingStatus;
             
-            // CRITICAL: Track missingCount - increment when status changes to "Missing"
-            let finalMissingCount = existingItem.missingCount || 0;
-            if (newStatus === 'Missing') {
-              if (existingStatus !== 'Missing') {
-                // Status changed from non-Missing to Missing - increment count
-                finalMissingCount = (existingItem.missingCount || 0) + 1;
-                console.log(`📈 Incremented missingCount for ${newItem.type}: ${existingItem.missingCount || 0} → ${finalMissingCount} (status changed to Missing)`);
-              } else if (newItem.missingCount !== undefined) {
-                // Status is already Missing, but frontend sent a new missingCount value
-                finalMissingCount = Number(newItem.missingCount);
-                console.log(`📊 Updated missingCount for ${newItem.type} to ${finalMissingCount} (frontend provided value)`);
-              }
-              // If status is already Missing and frontend didn't send missingCount, keep existing count
+            console.log(`🔵 Status check: existing="${existingStatus}", new="${newStatus}"`);
+            
+            // CRITICAL: Track missingCount - increment every time status is set to "Missing"
+            // Normalize status to handle case variations
+            const normalizedNewStatus = newStatus === 'Missing' || newStatus.toLowerCase() === 'missing' ? 'Missing' : newStatus;
+            const normalizedExistingStatus = existingStatus === 'Missing' || existingStatus.toLowerCase() === 'missing' ? 'Missing' : existingStatus;
+            // IMPORTANT: Always preserve existing missingCount when status is not "Missing"
+            // This ensures we can increment correctly when changing back to "Missing"
+            // CRITICAL: Check existingItem.missingCount - handle both Mongoose documents and plain objects
+            // Try both toObject() result and direct access
+            const existingMissingCountValue = existingItemObj.missingCount !== undefined 
+              ? existingItemObj.missingCount 
+              : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+            const existingMissingCount = (existingMissingCountValue !== undefined && existingMissingCountValue !== null) 
+              ? Number(existingMissingCountValue) 
+              : 0;
+            let finalMissingCount = existingMissingCount;
+            
+            console.log(`🔍 MissingCount check for ${newItem.type}:`, {
+              existingStatus: normalizedExistingStatus,
+              newStatus: normalizedNewStatus,
+              existingMissingCount,
+              existingItemHasMissingCount: existingItem.missingCount !== undefined,
+              existingItemObjHasMissingCount: existingItemObj.missingCount !== undefined,
+              existingItemMissingCountValue: existingItem.missingCount,
+              existingItemObjMissingCountValue: existingItemObj.missingCount,
+              existingMissingCountValue,
+              willIncrement: normalizedNewStatus === 'Missing',
+              existingItemRaw: JSON.stringify(existingItemObj)
+            });
+            
+            if (normalizedNewStatus === 'Missing') {
+              // ✅ NEW behavior: every time status is "Missing", increment by 1
+              // Start from the actual database value (even if 0) and increment
+              // This ensures 0→1, 1→2, 2→3, ... on every save with status Missing
+              finalMissingCount = existingMissingCount + 1;
+              console.log(
+                `📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status is Missing, existingMissingCount from DB: ${existingMissingCountValue})`
+              );
             } else if (existingStatus === 'Missing' && newStatus !== 'Missing') {
               // Status changed from Missing to something else - keep count for history (don't reset)
-              console.log(`📋 Status changed from Missing to ${newStatus} for ${newItem.type} - keeping missingCount: ${finalMissingCount}`);
+              // CRITICAL: Preserve missingCount even when status is not "Missing" so we can increment correctly later
+              // IMPORTANT: Ensure finalMissingCount is set to the existing value (don't let it be 0)
+              // If existingMissingCount is 0 but db has a value, use the db value
+              if (finalMissingCount === 0) {
+                // Try to get the actual value from database
+                const dbMissingCount = existingItemObj.missingCount !== undefined 
+                  ? existingItemObj.missingCount 
+                  : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+                if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                  finalMissingCount = Number(dbMissingCount);
+                }
+              }
+              console.log(`📋 Status changed from Missing to ${normalizedNewStatus} for ${newItem.type} - preserving missingCount: ${finalMissingCount} (for future increments)`);
+            } else {
+              // Status is not "Missing" and wasn't "Missing" before - preserve existing count if any
+              // This ensures missingCount is preserved even when status is "Available"
+              if (finalMissingCount > 0) {
+                console.log(`📋 Preserving missingCount for ${newItem.type}: ${finalMissingCount} (status: ${normalizedNewStatus}, was: ${normalizedExistingStatus})`);
+              }
             }
             
+            // CRITICAL: Always preserve missingCount from database, even when status is "Available"
+            // This ensures we can increment correctly when changing back to "Missing"
+            let savedMissingCount: number | undefined;
+            if (normalizedNewStatus === 'Missing') {
+              // If Missing, use the incremented count
+              // CRITICAL: finalMissingCount is already incremented (existingMissingCount + 1)
+              // So it should always be at least 1 (0 + 1 = 1, 1 + 1 = 2, etc.)
+              // Ensure it's never 0 when saving
+              savedMissingCount = Math.max(finalMissingCount, 1);
+              console.log(`💾 Setting missingCount for ${newItem.type} with Missing status: ${savedMissingCount} (finalMissingCount: ${finalMissingCount}, existingMissingCount: ${existingMissingCount}, will save: ${savedMissingCount})`);
+            } else {
+              // If not Missing, ALWAYS preserve the existing missingCount from database if it exists
+              // CRITICAL: Check existingItemObj.missingCount (from toObject()) first, then existingItem.missingCount
+              // This ensures we preserve it even if it was calculated as 0
+              const dbMissingCount = existingItemObj.missingCount !== undefined 
+                ? existingItemObj.missingCount 
+                : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+              
+              // CRITICAL: If status changed from Missing to non-Missing, preserve the count that was set when Missing
+              // This ensures missingCount is preserved even when status becomes "Available"
+              if (normalizedExistingStatus === 'Missing' && normalizedNewStatus !== 'Missing') {
+                // Status changed from Missing - preserve the finalMissingCount (which should have the Missing count)
+                if (finalMissingCount > 0) {
+                  savedMissingCount = finalMissingCount;
+                  console.log(`💾 Preserving missingCount after status change from Missing to ${normalizedNewStatus} for ${newItem.type}: ${savedMissingCount}`);
+                } else if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                  savedMissingCount = Number(dbMissingCount);
+                  console.log(`💾 Preserving missingCount from database after status change from Missing to ${newStatus} for ${newItem.type}: ${savedMissingCount}`);
+                } else {
+                  // If we can't find the value, try to preserve what was there (might be 0, but that's okay)
+                  savedMissingCount = finalMissingCount > 0 ? finalMissingCount : (dbMissingCount !== undefined && dbMissingCount !== null ? Number(dbMissingCount) : undefined);
+                }
+              } else if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                savedMissingCount = Number(dbMissingCount);
+                console.log(`💾 Preserving existing missingCount from database for ${newItem.type}: ${savedMissingCount} (status: ${newStatus}, from: ${JSON.stringify({ existingItemObj: existingItemObj.missingCount, existingItem: existingItem.missingCount })})`);
+              } else if (finalMissingCount > 0) {
+                savedMissingCount = finalMissingCount;
+              } else {
+                savedMissingCount = undefined; // Only set undefined if it was never set before
+              }
+            }
+            
+            // CRITICAL: Remove missingCount from newItem spread to prevent frontend from overriding our calculated value
+            const { missingCount: _, ...newItemWithoutMissingCount } = newItem;
             const updatedItem = {
-              ...newItem,
+              ...newItemWithoutMissingCount,
               // Preserve existing status-related fields if new item doesn't have them
-              status: newStatus,
-              missingCount: finalMissingCount > 0 ? finalMissingCount : (newStatus === 'Missing' ? 1 : undefined),
+              status: normalizedNewStatus,
+              // CRITICAL: Always set missingCount explicitly - ignore any value from frontend
+              // IMPORTANT: Explicitly set missingCount to ensure it's saved correctly
+              missingCount: savedMissingCount,
               receivedDate: newItem.receivedDate !== undefined ? newItem.receivedDate : existingItem.receivedDate
             };
+            
+            // CRITICAL: Log before assignment to verify the value
+            console.log(`🔧 Setting updatedItem for ${newItem.type}:`, {
+              status: normalizedNewStatus,
+              savedMissingCount,
+              savedMissingCountType: typeof savedMissingCount,
+              existingItemMissingCount: existingItem.missingCount,
+              existingItemMissingCountType: typeof existingItem.missingCount
+            });
+            
             uniform.items[existingItemIndex] = updatedItem;
+            // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
+            uniform.markModified('items');
             console.log(`✅ Updated existing item at index ${existingItemIndex}: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${updatedItem.status || 'not set'}, MissingCount: ${updatedItem.missingCount || 0}`);
+            console.log(`   📊 Item data being saved:`, {
+              type: updatedItem.type,
+              status: updatedItem.status,
+              missingCount: updatedItem.missingCount,
+              missingCountType: typeof updatedItem.missingCount,
+              hasMissingCount: updatedItem.missingCount !== undefined,
+              updatedItemKeys: Object.keys(updatedItem)
+            });
+            
+            // CRITICAL: Verify the item in the array after assignment
+            const verifyItem = uniform.items[existingItemIndex];
+            console.log(`   🔍 Verification - Item in array after assignment:`, {
+              type: verifyItem.type,
+              status: verifyItem.status,
+              missingCount: verifyItem.missingCount,
+              missingCountType: typeof verifyItem.missingCount,
+              hasMissingCount: verifyItem.missingCount !== undefined
+            });
           } else {
           // Add new item to existing collection
+          // CRITICAL: If new item has status "Missing", set missingCount to 1
+          if (newItem.status === 'Missing') {
+            newItem.missingCount = 1;
+            console.log(`   📝 New item with Missing status - setting missingCount to 1 for ${newItem.type}`);
+          }
           uniform.items.push(newItem);
-          console.log(`✅ Added NEW item to existing uniform: ${newItem.type} (${newItem.size || 'no size'})`);
+          // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
+          uniform.markModified('items');
+          console.log(`✅ Added NEW item to existing uniform: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${newItem.status || 'not set'}, MissingCount: ${newItem.missingCount || 0}`);
         }
         
         // Validate before saving
@@ -3802,6 +5578,25 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
       await uniform.save({ session });
         console.log(`✅ MERGED item into uniform collection for ${req.user.sispaId}: Total items now: ${uniform.items.length}`);
         console.log(`   All items after merge:`, uniform.items.map((i: any) => `${i.category}/${i.type}/${i.size || 'no size'}`).join(', '));
+        
+        // CRITICAL: Post-save verification - re-fetch from database to verify missingCount was saved
+        const savedUniform = await MemberUniform.findById(uniform._id).session(session || undefined);
+        if (savedUniform) {
+          const savedItem = savedUniform.items.find((item: any) => {
+            const itemKey = getItemKey(item);
+            const newItemKey = getItemKey(validatedItems[0]);
+            return itemKey === newItemKey;
+          });
+          if (savedItem) {
+            const savedItemObj = (savedItem as any).toObject ? (savedItem as any).toObject() : savedItem;
+            console.log(`🔍 POST-SAVE VERIFICATION for ${savedItem.type}:`, {
+              status: savedItemObj.status,
+              missingCount: savedItemObj.missingCount,
+              missingCountType: typeof savedItemObj.missingCount,
+              rawMissingCount: savedItem.missingCount
+            });
+          }
+        }
       } else {
         // MERGE MODE (multiple items): Frontend sent multiple items - merge with existing items
         // CRITICAL: Don't replace all items - merge new items with existing items
@@ -3825,42 +5620,153 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
           });
           
           if (existingItemIndex >= 0) {
+            console.log(`\n🟢 ===== MULTI-ITEM: FOUND EXISTING ITEM - WILL UPDATE =====`);
+            console.log(`Item: ${newItem.type} (${newItem.size || 'no size'})`);
+            
             // Update existing item (preserve status if not provided in new item)
             const existingItem = uniform.items[existingItemIndex];
-            const existingStatus = existingItem.status || 'Available';
-            const newStatus = newItem.status !== undefined ? newItem.status : existingStatus;
+            // CRITICAL: Convert Mongoose subdocument to plain object to access all fields reliably
+            // This ensures we can read missingCount even if it's not directly accessible on the document
+            const existingItemObj = (existingItem as any).toObject ? (existingItem as any).toObject() : existingItem;
+            const existingStatus = (existingItemObj.status || existingItem.status || 'Available');
+            const newStatus = newItem.status !== undefined ? String(newItem.status).trim() : existingStatus;
+            
+            console.log(`🟢 MULTI-ITEM Status check: existing="${existingStatus}", new="${newStatus}"`);
             
             // CRITICAL: Track missingCount - increment when status changes to "Missing"
-            let finalMissingCount = existingItem.missingCount || 0;
-            if (newStatus === 'Missing') {
-              if (existingStatus !== 'Missing') {
-                // Status changed from non-Missing to Missing - increment count
-                finalMissingCount = (existingItem.missingCount || 0) + 1;
-                console.log(`   📈 Incremented missingCount for ${newItem.type}: ${existingItem.missingCount || 0} → ${finalMissingCount} (status changed to Missing)`);
-              } else if (newItem.missingCount !== undefined) {
-                // Status is already Missing, but frontend sent a new missingCount value
-                finalMissingCount = Number(newItem.missingCount);
-                console.log(`   📊 Updated missingCount for ${newItem.type} to ${finalMissingCount} (frontend provided value)`);
-              }
-              // If status is already Missing and frontend didn't send missingCount, keep existing count
+            // Normalize status to handle case variations
+            const normalizedNewStatus = newStatus === 'Missing' || newStatus.toLowerCase() === 'missing' ? 'Missing' : newStatus;
+            const normalizedExistingStatus = existingStatus === 'Missing' || existingStatus.toLowerCase() === 'missing' ? 'Missing' : existingStatus;
+            // IMPORTANT: Always preserve existing missingCount, even when status is "Available"
+            // This ensures we can increment correctly when changing back to "Missing"
+            // CRITICAL: Check existingItem.missingCount - handle both Mongoose documents and plain objects
+            // Try both toObject() result and direct access
+            const existingMissingCountValue = existingItemObj.missingCount !== undefined 
+              ? existingItemObj.missingCount 
+              : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+            const existingMissingCount = (existingMissingCountValue !== undefined && existingMissingCountValue !== null) 
+              ? Number(existingMissingCountValue) 
+              : 0;
+            let finalMissingCount = existingMissingCount;
+            
+            console.log(`   🔍 MissingCount check for ${newItem.type}:`, {
+              existingStatus: normalizedExistingStatus,
+              newStatus: normalizedNewStatus,
+              existingMissingCount,
+              existingItemHasMissingCount: existingItem.missingCount !== undefined,
+              existingItemObjHasMissingCount: existingItemObj.missingCount !== undefined,
+              existingItemMissingCountValue: existingItem.missingCount,
+              existingItemObjMissingCountValue: existingItemObj.missingCount,
+              existingMissingCountValue,
+              willIncrement: normalizedNewStatus === 'Missing',
+              existingItemRaw: JSON.stringify(existingItemObj)
+            });
+            
+            if (normalizedNewStatus === 'Missing') {
+              // CRITICAL: Every time status is "Missing", increment by 1
+              // Start from the actual database value (even if 0) and increment
+              // This ensures missingCount always increases: 0→1, 1→2, 2→3, etc.
+              // Ignore frontend's missingCount value - backend always calculates it
+              finalMissingCount = existingMissingCount + 1;
+              console.log(`   📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status is Missing, existingMissingCount from DB: ${existingMissingCountValue})`);
             } else if (existingStatus === 'Missing' && newStatus !== 'Missing') {
               // Status changed from Missing to something else - keep count for history (don't reset)
-              console.log(`   📋 Status changed from Missing to ${newStatus} for ${newItem.type} - keeping missingCount: ${finalMissingCount}`);
+              // CRITICAL: Preserve missingCount even when status is not "Missing" so we can increment correctly later
+              // IMPORTANT: Ensure finalMissingCount is set to the existing value (don't let it be 0)
+              // If existingMissingCount is 0 but db has a value, use the db value
+              if (finalMissingCount === 0) {
+                // Try to get the actual value from database
+                const dbMissingCount = existingItemObj.missingCount !== undefined 
+                  ? existingItemObj.missingCount 
+                  : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+                if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                  finalMissingCount = Number(dbMissingCount);
+                }
+              }
+              console.log(`   📋 Status changed from Missing to ${normalizedNewStatus} for ${newItem.type} - preserving missingCount: ${finalMissingCount} (for future increments)`);
+            } else {
+              // Status is not "Missing" and wasn't "Missing" before - preserve existing count if any
+              // This ensures missingCount is preserved even when status is "Available"
+              if (finalMissingCount > 0) {
+                console.log(`   📋 Preserving missingCount for ${newItem.type}: ${finalMissingCount} (status: ${normalizedNewStatus}, was: ${normalizedExistingStatus})`);
+              }
             }
             
+            // CRITICAL: Always preserve missingCount from database, even when status is "Available"
+            // This ensures we can increment correctly when changing back to "Missing"
+            let savedMissingCount: number | undefined;
+            if (normalizedNewStatus === 'Missing') {
+              // If Missing, use the incremented count
+              // CRITICAL: finalMissingCount is already incremented (existingMissingCount + 1)
+              // So it should always be at least 1 (0 + 1 = 1, 1 + 1 = 2, etc.)
+              // Ensure it's never 0 when saving
+              savedMissingCount = Math.max(finalMissingCount, 1);
+              console.log(`   💾 Setting missingCount for ${newItem.type} with Missing status: ${savedMissingCount} (finalMissingCount: ${finalMissingCount}, existingMissingCount: ${existingMissingCount}, will save: ${savedMissingCount})`);
+            } else {
+              // If not Missing, ALWAYS preserve the existing missingCount from database if it exists
+              // CRITICAL: Check existingItemObj.missingCount (from toObject()) first, then existingItem.missingCount
+              // This ensures we preserve it even if it was calculated as 0
+              const dbMissingCount = existingItemObj.missingCount !== undefined 
+                ? existingItemObj.missingCount 
+                : (existingItem.missingCount !== undefined ? existingItem.missingCount : undefined);
+              
+              // CRITICAL: If status changed from Missing to non-Missing, preserve the count that was set when Missing
+              // This ensures missingCount is preserved even when status becomes "Available"
+              if (normalizedExistingStatus === 'Missing' && normalizedNewStatus !== 'Missing') {
+                // Status changed from Missing - preserve the finalMissingCount (which should have the Missing count)
+                if (finalMissingCount > 0) {
+                  savedMissingCount = finalMissingCount;
+                  console.log(`   💾 Preserving missingCount after status change from Missing to ${normalizedNewStatus} for ${newItem.type}: ${savedMissingCount}`);
+                } else if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                  savedMissingCount = Number(dbMissingCount);
+                  console.log(`   💾 Preserving missingCount from database after status change from Missing to ${normalizedNewStatus} for ${newItem.type}: ${savedMissingCount}`);
+                } else {
+                  // If we can't find the value, try to preserve what was there (might be 0, but that's okay)
+                  savedMissingCount = finalMissingCount > 0 ? finalMissingCount : (dbMissingCount !== undefined && dbMissingCount !== null ? Number(dbMissingCount) : undefined);
+                }
+              } else if (dbMissingCount !== undefined && dbMissingCount !== null && Number(dbMissingCount) > 0) {
+                savedMissingCount = Number(dbMissingCount);
+                console.log(`   💾 Preserving existing missingCount from database for ${newItem.type}: ${savedMissingCount} (status: ${normalizedNewStatus}, from: ${JSON.stringify({ existingItemObj: existingItemObj.missingCount, existingItem: existingItem.missingCount })})`);
+              } else if (finalMissingCount > 0) {
+                savedMissingCount = finalMissingCount;
+              } else {
+                savedMissingCount = undefined; // Only set undefined if it was never set before
+              }
+            }
+            
+            // CRITICAL: Remove missingCount from newItem spread to prevent frontend from overriding our calculated value
+            const { missingCount: __, ...newItemWithoutMissingCount2 } = newItem;
             const updatedItem = {
-              ...newItem,
+              ...newItemWithoutMissingCount2,
               // Preserve existing status-related fields if new item doesn't have them
-              status: newStatus,
-              missingCount: finalMissingCount > 0 ? finalMissingCount : (newStatus === 'Missing' ? 1 : undefined),
+              status: normalizedNewStatus,
+              // CRITICAL: Always set missingCount explicitly - ignore any value from frontend
+              // IMPORTANT: Explicitly set missingCount to ensure it's saved correctly
+              missingCount: savedMissingCount,
               receivedDate: newItem.receivedDate !== undefined ? newItem.receivedDate : existingItem.receivedDate
             };
             uniform.items[existingItemIndex] = updatedItem;
+            // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
+            uniform.markModified('items');
             console.log(`   ✅ Updated existing item at index ${existingItemIndex}: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${updatedItem.status || 'not set'}, MissingCount: ${updatedItem.missingCount || 0}`);
+              console.log(`   📊 Item data being saved:`, {
+              type: updatedItem.type,
+              status: updatedItem.status,
+              missingCount: updatedItem.missingCount,
+              missingCountType: typeof updatedItem.missingCount,
+              hasMissingCount: updatedItem.missingCount !== undefined
+            });
           } else {
             // Add new item to existing collection (don't replace - preserve all existing items)
+            // CRITICAL: If new item has status "Missing", set missingCount to 1
+            if (newItem.status === 'Missing') {
+              newItem.missingCount = 1;
+              console.log(`   📝 New item with Missing status - setting missingCount to 1 for ${newItem.type}`);
+            }
             uniform.items.push(newItem);
-            console.log(`   ✅ Added NEW item to existing uniform: ${newItem.type} (${newItem.size || 'no size'})`);
+            // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
+            uniform.markModified('items');
+            console.log(`   ✅ Added NEW item to existing uniform: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${newItem.status || 'not set'}, MissingCount: ${newItem.missingCount || 0}`);
           }
         }
         
@@ -3895,14 +5801,50 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
     
     console.log(`✅ Uniform updated successfully - SISPA ID: ${savedUniform.sispaId}, Items count: ${savedUniform.items.length}`);
     console.log(`   Updated items:`, savedUniform.items.map((i: any) => `${i.category}/${i.type}/${i.size || 'N/A'}`).join(', '));
+    
+    // CRITICAL: Log missingCount for all items to verify it's saved correctly
+    console.log(`\n📊 MissingCount verification from database (after save):`);
+    savedUniform.items.forEach((item: any) => {
+      if (item.status === 'Missing' || (item.missingCount !== undefined && item.missingCount !== null)) {
+        // CRITICAL: Convert to plain object to access missingCount reliably
+        const itemObj = (item as any).toObject ? (item as any).toObject() : item;
+        const missingCountValue = itemObj.missingCount !== undefined 
+          ? itemObj.missingCount 
+          : (item.missingCount !== undefined ? item.missingCount : undefined);
+        console.log(`   - ${item.type}: status="${item.status}", missingCount=${missingCountValue !== undefined ? missingCountValue : 'undefined'}, type=${typeof missingCountValue}, raw=${JSON.stringify({ itemObj: itemObj.missingCount, item: item.missingCount })}`);
+      }
+    });
     console.log(`🟡 ===== END UPDATE MEMBER UNIFORM REQUEST =====\n`);
 
-    // Format items with status fields for response
-    const formattedItems = formatUniformItemsWithStatus(
-      savedUniform.items,
+    // Format items with status fields for response (with prices for shirts)
+    // CRITICAL: Convert items to plain objects before formatting to ensure missingCount is accessible
+    const itemsForFormatting = savedUniform.items.map((item: any) => {
+      return (item as any).toObject ? (item as any).toObject() : item;
+    });
+    
+    const formattedItems = await formatUniformItemsWithStatus(
+      itemsForFormatting,
       savedUniform.createdAt,
       savedUniform.updatedAt
     );
+    
+    // CRITICAL: Log formatted items to verify missingCount is included
+    console.log(`\n📊 Formatted items missingCount check:`);
+    formattedItems.forEach((item: any) => {
+      if (item.status === 'Missing') {
+        console.log(`   - ${item.type}: status="${item.status}", missingCount=${item.missingCount !== undefined ? item.missingCount : 'MISSING FROM RESPONSE'}, hasMissingCount=${item.missingCount !== undefined}`);
+      }
+    });
+
+    // Log inventory changes summary
+    console.log(`📊 Inventory changes summary for response:`);
+    console.log(`  - Items restored: ${restoredItems.length}`);
+    if (restoredItems.length > 0) {
+      restoredItems.forEach((item, idx) => {
+        console.log(`    ${idx + 1}. Restored ${item.quantityRestored} of ${item.type} (${item.size || 'no size'}) - Inventory: ${item.oldInventoryQuantity} → ${item.newInventoryQuantity}`);
+      });
+    }
+    console.log(`  - Items deducted: ${inventoryUpdates.length}`);
 
     res.json({
       success: true,
@@ -3911,6 +5853,13 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
         sispaId: savedUniform.sispaId,
         items: formattedItems,
         itemCount: formattedItems.length
+      },
+      inventoryChanges: {
+        restored: restoredItems.length > 0 ? restoredItems : undefined,
+        restoredCount: restoredItems.length,
+        deductedCount: inventoryUpdates.length,
+        // Note: Detailed deduction information is logged in backend console
+        // Frontend can check backend logs for detailed deduction information
       }
     });
   } catch (error: any) {
@@ -4004,16 +5953,16 @@ export const addOwnUniform = async (req: AuthRequest, res: Response) => {
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Please provide an array of uniform items. Each item must have: category, type, size, and quantity.' 
+        message: 'Please provide an array of uniform items. Each item must have: category, type, and quantity. Size is optional for accessories.' 
       });
     }
 
-    // Validate each item
+    // Validate each item - allow null size for accessories
     for (const item of items) {
-      if (!item.category || !item.type || !item.size || item.quantity === undefined) {
+      if (!item.category || !item.type || item.quantity === undefined) {
         return res.status(400).json({ 
           success: false, 
-          message: 'Each uniform item must have: category, type, size, and quantity.' 
+          message: 'Each uniform item must have: category, type, and quantity. Size is optional for accessories.' 
         });
       }
       if (item.quantity < 1) {
@@ -4021,6 +5970,24 @@ export const addOwnUniform = async (req: AuthRequest, res: Response) => {
           success: false, 
           message: 'Quantity must be at least 1.' 
         });
+      }
+      
+      // Validate size: Only require size when item needs size AND status is "Available"
+      const status = (item.status || 'Available').trim();
+      const needsSize = requiresSize(item.category, item.type);
+      const hasValidSize = item.size && item.size !== '' && item.size !== null && item.size !== undefined && String(item.size).toLowerCase() !== 'n/a';
+      
+      // ✅ Only enforce size when Available AND needsSize
+      if (needsSize && status === 'Available' && !hasValidSize) {
+        return res.status(400).json({
+          success: false,
+          message: `Size is required for ${item.type} when status is Available`
+        });
+      }
+      
+      // ✅ If not available or accessory, allow size to be null/empty
+      if (status !== 'Available' || !needsSize) {
+        item.size = item.size && String(item.size).trim() !== '' && String(item.size).toLowerCase() !== 'n/a' ? item.size : null;
       }
     }
 
@@ -4080,10 +6047,10 @@ export const updateOwnUniform = async (req: AuthRequest, res: Response) => {
     // If items provided, validate them
     if (items && Array.isArray(items)) {
       for (const item of items) {
-        if (!item.category || !item.type || !item.size || item.quantity === undefined) {
+        if (!item.category || !item.type || item.quantity === undefined) {
           return res.status(400).json({ 
             success: false, 
-            message: 'Each uniform item must have: category, type, size, and quantity.' 
+            message: 'Each uniform item must have: category, type, and quantity. Size is optional for accessories.' 
           });
         }
         if (item.quantity < 1) {
@@ -4091,6 +6058,24 @@ export const updateOwnUniform = async (req: AuthRequest, res: Response) => {
             success: false, 
             message: 'Quantity must be at least 1.' 
           });
+        }
+        
+        // Validate size: Only require size when item needs size AND status is "Available"
+        const status = (item.status || 'Available').trim();
+        const needsSize = requiresSize(item.category, item.type);
+        const hasValidSize = item.size && item.size !== '' && item.size !== null && item.size !== undefined && String(item.size).toLowerCase() !== 'n/a';
+        
+        // ✅ Only enforce size when Available AND needsSize
+        if (needsSize && status === 'Available' && !hasValidSize) {
+          return res.status(400).json({
+            success: false,
+            message: `Size is required for ${item.type} when status is Available`
+          });
+        }
+        
+        // ✅ If not available or accessory, allow size to be null/empty
+        if (status !== 'Available' || !needsSize) {
+          item.size = item.size && String(item.size).trim() !== '' && String(item.size).toLowerCase() !== 'n/a' ? item.size : null;
         }
       }
     }
@@ -4164,12 +6149,12 @@ export const addUniformItem = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ success: false, message: 'User not authenticated' });
     }
 
-    const { category, type, size, quantity, color, notes } = req.body;
+    const { category, type, size, quantity, color, notes, status } = req.body;
 
-    if (!category || !type || !size || quantity === undefined) {
+    if (!category || !type || quantity === undefined) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Missing required fields: category, type, size, and quantity are required' 
+        message: 'Missing required fields: category, type, and quantity are required. Size is optional for accessories.' 
       });
     }
 
@@ -4179,6 +6164,24 @@ export const addUniformItem = async (req: AuthRequest, res: Response) => {
         message: 'Quantity must be at least 1' 
       });
     }
+    
+    // Validate size: Only require size when item needs size AND status is "Available"
+    const itemStatus = (status || 'Available').trim();
+    const needsSize = requiresSize(category, type);
+    const hasValidSize = size && size !== '' && size !== null && size !== undefined && String(size).toLowerCase() !== 'n/a';
+    
+    // ✅ Only enforce size when Available AND needsSize
+    if (needsSize && itemStatus === 'Available' && !hasValidSize) {
+      return res.status(400).json({
+        success: false,
+        message: `Size is required for ${type} when status is Available`
+      });
+    }
+    
+    // ✅ If not available or accessory, normalize size to null
+    const normalizedSize = (itemStatus !== 'Available' || !needsSize)
+      ? (size && String(size).trim() !== '' && String(size).toLowerCase() !== 'n/a' ? size : null)
+      : size;
 
     let uniform = await MemberUniform.findOne({ sispaId: req.user.sispaId });
 
@@ -4186,11 +6189,11 @@ export const addUniformItem = async (req: AuthRequest, res: Response) => {
       // Create new collection with this item
       uniform = new MemberUniform({
         sispaId: req.user.sispaId,
-        items: [{ category, type, size, quantity, color: color || null, notes: notes || null }]
+        items: [{ category, type, size: normalizedSize, quantity, color: color || null, notes: notes || null }]
       });
     } else {
       // Add item to existing collection
-      uniform.items.push({ category, type, size, quantity, color: color || null, notes: notes || null });
+      uniform.items.push({ category, type, size: normalizedSize, quantity, color: color || null, notes: notes || null });
     }
 
     await uniform.save();
@@ -4275,9 +6278,13 @@ export const deleteUniformItem = async (req: AuthRequest, res: Response) => {
 export const getSizeCharts = async (req: Request, res: Response) => {
   try {
     // Get all inventory items with size charts
+    // OPTIMIZATION: Add limit and use lean for better performance
     const itemsWithCharts = await UniformInventory.find({
       sizeChart: { $exists: true, $ne: null }
-    }).select('category type sizeChart');
+    })
+      .select('category type sizeChart')
+      .limit(500) // Reasonable limit for size chart queries
+      .lean();
 
     // Group by category-type and get unique size charts
     const sizeChartMap: Record<string, string> = {};

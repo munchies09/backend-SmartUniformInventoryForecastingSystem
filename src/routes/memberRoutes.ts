@@ -16,7 +16,8 @@ import {
   getMemberUniform, 
   createMemberUniform, 
   updateMemberUniform,
-  getMemberUniformBySispaId
+  getMemberUniformBySispaId,
+  deleteMemberUniformBySispaId
 } from "../controllers/uniformController";
 import { authenticate, authorizeAdmin } from "../middleware/auth";
 
@@ -67,6 +68,9 @@ router.post("/add", authenticate, authorizeAdmin, addMember);
 
 // Get member uniform by sispaId (admin only) - MUST be before /:id route to avoid conflicts
 router.get("/:sispaId/uniform", authenticate, authorizeAdmin, getMemberUniformBySispaId);
+
+// Delete member uniform by sispaId (admin only) - MUST be before /:id route to avoid conflicts
+router.delete("/:sispaId/uniform", authenticate, authorizeAdmin, deleteMemberUniformBySispaId);
 
 router.put("/:id", authenticate, authorizeAdmin, updateMember);
 router.delete("/:id", authenticate, authorizeAdmin, deleteMember);

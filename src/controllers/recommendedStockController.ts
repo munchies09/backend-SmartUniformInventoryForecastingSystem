@@ -90,8 +90,11 @@ export const importRecommendedStock = async (req: AuthRequest, res: Response) =>
       const normalizedType = normalizeTypeForMatching(rec.type);
       
       // Get all inventory items with matching category (case-insensitive)
+      // OPTIMIZATION: Add limit and use lean for better performance
       const categoryRegex = new RegExp(`^${String(rec.category).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-      const categoryItems = await UniformInventory.find({ category: categoryRegex });
+      const categoryItems = await UniformInventory.find({ category: categoryRegex })
+        .limit(500) // Reasonable limit for category queries
+        .lean();
       
       // Find matching type (flexible matching)
       let matchedItem = null;
@@ -492,9 +495,11 @@ export const getInventoryWithRecommendations = async (req: AuthRequest, res: Res
     }
 
     // Get all inventory items
+    // OPTIMIZATION: Add limit and use lean for better performance
     const inventoryItems = await UniformInventory.find(filter)
       .sort({ category: 1, type: 1, size: 1 })
-      .exec();
+      .limit(2000) // Reasonable limit for recommendations
+      .lean();
 
     // Get latest recommendations for all items
     const recommendations = await RecommendedStock.aggregate([

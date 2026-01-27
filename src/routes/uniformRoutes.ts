@@ -14,7 +14,8 @@ import {
   deductInventory,
   getSizeCharts,
   getShirtPrices,
-  updateShirtPrice
+  updateShirtPrice,
+  getInventoryMedia
 } from '../controllers/uniformController';
 import { authenticate, authorizeAdmin } from '../middleware/auth';
 
@@ -32,20 +33,24 @@ router.post('/deduct', authenticate, deductInventory);
 // Get all uniforms (inventory) - Now accessible to all authenticated users (for user uniform UI)
 router.get('/', authenticate, getUniforms);
 
+router.get('/inventory-media/:category/:type', authenticate, getInventoryMedia);
+
 // Add uniform to inventory
 router.post('/', authenticate, authorizeAdmin, addUniform);
 
-// Update uniform in inventory
-router.put('/:id', authenticate, authorizeAdmin, updateUniform);
 
-// Delete uniform from inventory (by ID)
-router.delete('/:id', authenticate, authorizeAdmin, deleteUniform);
+
+// CRITICAL: Specific DELETE routes MUST come BEFORE generic /:id route
+// Otherwise /:id will match "by-attributes" and "type" as IDs
 
 // Delete uniform from inventory (by category, type, size - alternative method)
+// MUST be before /:id to avoid route conflict
 router.delete('/by-attributes', authenticate, authorizeAdmin, deleteUniformByAttributes);
 
 // Delete all inventory items for a specific type
+// MUST be before /:id to avoid route conflict
 router.delete('/type/:category/:type', authenticate, authorizeAdmin, deleteUniformByType);
+
 
 // ===============================
 // SIZE CHART MANAGEMENT
@@ -79,5 +84,11 @@ router.post('/my-uniform/item', authenticate, addUniformItem);
 
 // Delete a specific uniform item
 router.delete('/my-uniform/item', authenticate, deleteUniformItem);
+
+// Update uniform in inventory
+router.put('/:id', authenticate, authorizeAdmin, updateUniform);
+
+// Delete uniform from inventory (by ID) - MUST be LAST (generic route)
+router.delete('/:id', authenticate, authorizeAdmin, deleteUniform);
 
 export default router;

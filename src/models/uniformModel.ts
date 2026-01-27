@@ -25,6 +25,7 @@ export interface IUniformInventory extends Document {
   lastRecommendationDate?: Date; // When recommendation was last updated
   image?: string | null; // Base64 encoded image or URL (optional, same for all sizes of same type)
   sizeChart?: string | null; // URL or path to size chart image (optional, same for all sizes of same type)
+  price?: number | null; // Price in RM (optional, mainly for shirt items)
 }
 
 // Member's uniform collection (stores all uniform items for a user)
@@ -89,6 +90,12 @@ const uniformInventorySchema = new Schema<IUniformInventory>({
     type: String,
     default: null, // Optional - URL or path to size chart image
     required: false
+  },
+  price: {
+    type: Number,
+    default: null, // Optional - Price in RM (mainly for shirt items)
+    required: false,
+    min: 0
   }
 }, { 
   timestamps: true,
@@ -99,6 +106,15 @@ const uniformInventorySchema = new Schema<IUniformInventory>({
 
 // Create compound unique index on (category, type, size)
 uniformInventorySchema.index({ category: 1, type: 1, size: 1 }, { unique: true });
+
+// Performance indexes for common queries
+// Index for category queries (already exists as single field, but compound helps sorting)
+uniformInventorySchema.index({ category: 1, type: 1 }); // For category+type queries
+uniformInventorySchema.index({ category: 1, status: 1 }); // For category+status filtering
+uniformInventorySchema.index({ type: 1, size: 1 }); // For type+size queries
+uniformInventorySchema.index({ status: 1 }); // For status filtering (already exists, but explicit)
+uniformInventorySchema.index({ createdAt: -1 }); // For sorting by creation date
+uniformInventorySchema.index({ updatedAt: -1 }); // For sorting by update date
 
 // Member uniform schema (for users - their personal uniform collection)
 const memberUniformSchema = new Schema<IMemberUniform>({
@@ -144,7 +160,7 @@ const memberUniformSchema = new Schema<IMemberUniform>({
     },
     missingCount: { 
       type: Number, 
-      default: undefined,
+      default: 0,
       required: false,
       min: 0
     },

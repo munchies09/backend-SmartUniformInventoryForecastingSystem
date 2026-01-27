@@ -105,7 +105,10 @@ export const getAllForecasts = async (req: AuthRequest, res: Response) => {
     }
 
     // Get all inventory items matching filter
-    const inventoryItems = await UniformInventory.find(filter);
+    // OPTIMIZATION: Add limit and use lean for better performance
+    const inventoryItems = await UniformInventory.find(filter)
+      .limit(2000) // Reasonable limit for forecast queries
+      .lean();
 
     if (inventoryItems.length === 0) {
       return res.json({

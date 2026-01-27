@@ -57,11 +57,11 @@ export const signUp = async (req: Request, res: Response) => {
   try {
     const { sispaId, name, email, batch, password, matricNumber, profilePicture } = req.body;
 
-    // Validate required fields - sispaId is now required
-    if (!sispaId || !name || !email || !batch || !password) {
+    // Validate required fields - batch is now optional
+    if (!sispaId || !name || !email || !password) {
       return res.status(400).json({ 
         success: false,
-        message: 'Missing required fields: sispaId, name, email, batch, and password are required' 
+        message: 'Missing required fields: sispaId, name, email, and password are required' 
       });
     }
 
@@ -229,11 +229,11 @@ export const addMember = async (req: Request, res: Response) => {
   try {
     const { sispaId, name, email, batch, password, role, matricNumber, phoneNumber, profilePicture } = req.body;
 
-    // Validate required fields - sispaId is now required
-    if (!sispaId || !name || !email || !batch || !password) {
+    // Validate required fields - batch is now optional
+    if (!sispaId || !name || !email || !password) {
       return res.status(400).json({ 
         success: false,
-        message: 'Missing required fields: sispaId, name, email, batch, and password are required' 
+        message: 'Missing required fields: sispaId, name, email, and password are required' 
       });
     }
 
