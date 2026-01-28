@@ -647,55 +647,65 @@ async function formatUniformItemsWithStatus(
         }
       }
 
-      // Add status fields if they exist in the item, otherwise calculate default
-      if (item.status !== undefined && item.status !== null) {
-        // Use status from database if available
-        itemData.status = item.status;
-        
-        // Include missingCount if status is "Missing"
-        // CRITICAL: Always include missingCount when status is "Missing" (for frontend display)
-        // Also include missingCount when status is "Available" if it exists (for debugging/verification)
-        if (item.status === 'Missing') {
-          // CRITICAL: Check item.missingCount - it might be stored as number, string, or undefined
-          const itemMissingCount = item.missingCount !== undefined && item.missingCount !== null 
-            ? Number(item.missingCount) 
-            : null;
-          
-          // CRITICAL: Include the actual database value, even if it's 0
-          // The backend will increment it on the next save, so we need to show the actual value
-          // If we default to 1 here, the frontend thinks it's 1 but DB has 0, causing confusion
-          if (itemMissingCount !== null) {
-            itemData.missingCount = itemMissingCount;
-            console.log(`✅ Including missingCount for ${item.type}: ${itemMissingCount} (from database, raw: ${JSON.stringify(item.missingCount)})`);
-          } else {
-            // Only default to 1 if the field doesn't exist at all (null/undefined)
-            // This means it was never set, so backend will set it to 1 on next save
-            itemData.missingCount = 1;
-            console.log(`⚠️  Item ${item.type} has status "Missing" but missingCount is not set (null/undefined) - defaulting to 1 for display`);
-          }
-        } else if (item.missingCount !== undefined && item.missingCount !== null && Number(item.missingCount) > 0) {
-          // Include missingCount even when status is not "Missing" (for debugging - shows preserved count)
-          // This helps verify that missingCount is being preserved correctly
-          itemData.missingCount = Number(item.missingCount);
-          console.log(`📋 Item ${item.type} has status "${item.status}" but missingCount is preserved: ${item.missingCount}`);
-        }
-        
-        // Include receivedDate if status is "Available"
-        if (item.status === 'Available') {
-          if (item.receivedDate) {
-            itemData.receivedDate = item.receivedDate instanceof Date 
-              ? item.receivedDate.toISOString() 
-              : item.receivedDate;
-          } else {
-            // Default to uniform creation date if receivedDate not set
-            itemData.receivedDate = uniformCreatedAt?.toISOString() || new Date().toISOString();
-          }
-        }
+      // Add status fields with smart fallback:
+      // 1) Use status from DB if present
+      // 2) If no status but missingCount > 0, treat as "Missing" (heals old records)
+      // 3) Otherwise default to "Available"
+      const hasStatus = item.status !== undefined && item.status !== null;
+      const numericMissingCount = item.missingCount !== undefined && item.missingCount !== null
+        ? Number(item.missingCount)
+        : 0;
+
+      let effectiveStatus: 'Available' | 'Not Available' | 'Missing';
+      if (hasStatus) {
+        effectiveStatus = item.status as any;
+      } else if (numericMissingCount > 0) {
+        effectiveStatus = 'Missing';
+        console.log(`🩹 Healing status for ${item.type}: no status in DB but missingCount=${numericMissingCount} → treating as "Missing" in response`);
       } else {
-        // Default behavior: items in uniform are "Available"
-        // Use uniform createdAt as receivedDate (when uniform was first created/issued)
-        itemData.status = 'Available';
-        itemData.receivedDate = uniformCreatedAt?.toISOString() || new Date().toISOString();
+        effectiveStatus = 'Available';
+      }
+
+      itemData.status = effectiveStatus;
+      
+      // Include missingCount if status is "Missing"
+      // CRITICAL: Always include missingCount when status is "Missing" (for frontend display)
+      // Also include missingCount when status is "Available" if it exists (for debugging/verification)
+      if (effectiveStatus === 'Missing') {
+        // CRITICAL: Check item.missingCount - it might be stored as number, string, or undefined
+        const itemMissingCount = item.missingCount !== undefined && item.missingCount !== null 
+          ? Number(item.missingCount) 
+          : null;
+        
+        // CRITICAL: Include the actual database value, even if it's 0
+        // The backend will increment it on the next save, so we need to show the actual value
+        // If we default to 1 here, the frontend thinks it's 1 but DB has 0, causing confusion
+        if (itemMissingCount !== null) {
+          itemData.missingCount = itemMissingCount;
+          console.log(`✅ Including missingCount for ${item.type}: ${itemMissingCount} (from database, raw: ${JSON.stringify(item.missingCount)})`);
+        } else {
+          // Only default to 1 if the field doesn't exist at all (null/undefined)
+          // This means it was never set, so backend will set it to 1 on next save
+          itemData.missingCount = 1;
+          console.log(`⚠️  Item ${item.type} has status "Missing" but missingCount is not set (null/undefined) - defaulting to 1 for display`);
+        }
+      } else if (item.missingCount !== undefined && item.missingCount !== null && Number(item.missingCount) > 0) {
+        // Include missingCount even when status is not "Missing" (for debugging - shows preserved count)
+        // This helps verify that missingCount is being preserved correctly
+        itemData.missingCount = Number(item.missingCount);
+        console.log(`📋 Item ${item.type} has status "${effectiveStatus}" but missingCount is preserved: ${item.missingCount}`);
+      }
+      
+      // Include receivedDate if status is "Available"
+      if (effectiveStatus === 'Available') {
+        if (item.receivedDate) {
+          itemData.receivedDate = item.receivedDate instanceof Date 
+            ? item.receivedDate.toISOString() 
+            : item.receivedDate;
+        } else {
+          // Default to uniform creation date if receivedDate not set
+          itemData.receivedDate = uniformCreatedAt?.toISOString() || new Date().toISOString();
+        }
       }
 
       return itemData;
@@ -715,6 +725,7 @@ async function formatUniformItemsWithStatus(
   }).filter(item => item !== null); // Remove any null items from formatting errors
 }
 
+          // CRITICAL: Check item.missingCount - it might be stored as number, string, or undefined
 // Helper function to map frontend type names to possible inventory type names
 // Frontend sends "Uniform No 3 Female" and "Uniform No 4", but inventory may store "Pants No 3"/"Cloth No 3" and "Cloth No 4"/"Pants No 4"
 function getInventoryTypeVariations(category: string, type: string): string[] {
@@ -3519,6 +3530,8 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
       // Check for duplicates based on category, type, and size
       const existingItems = uniform.items;
       const newItemsToAdd: any[] = [];
+      // Track whether we updated any existing items (e.g. status / missingCount)
+      let updatedExistingItems = false;
       
       for (const newItem of uniqueItems) {
         // Normalize sizes for comparison (empty string and "N/A" should match)
@@ -3527,14 +3540,15 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
           return String(size).trim();
         };
         
-        // Check if this exact item already exists in database (compare normalized sizes)
-        const isDuplicate = existingItems.some((existing: any) => {
+        // Find matching existing item index (compare normalized sizes)
+        const existingIndex = existingItems.findIndex((existing: any) => {
           const existingSizeNorm = normalizeSizeForComparison(existing.size);
           const newSizeNorm = normalizeSizeForComparison(newItem.size);
           return existing.category === newItem.category &&
-          existing.type === newItem.type &&
+                 existing.type === newItem.type &&
                  existingSizeNorm === newSizeNorm;
         });
+        const isDuplicate = existingIndex >= 0;
         
         if (!isDuplicate) {
           // Item already normalized in uniqueItems, but ensure quantity is set
@@ -3545,22 +3559,58 @@ export const createMemberUniform = async (req: AuthRequest, res: Response) => {
           });
           console.log(`✅ Adding new item: ${newItem.type} size:"${newItem.size || 'EMPTY'}" category:${newItem.category}`);
         } else {
-          console.log(`⏭️  Skipping duplicate item: ${newItem.type} size:"${newItem.size || 'EMPTY'}"`);
+          // Duplicate item in request: instead of skipping completely,
+          // update the existing item's status (and missingCount) using the incoming status.
+          const existingItem = existingItems[existingIndex];
+          const incomingStatus = newItem.status && ['Available', 'Not Available', 'Missing'].includes(newItem.status)
+            ? newItem.status
+            : null;
+
+          console.log(`🔄 Duplicate item found - updating existing item instead of adding new: ${newItem.type} size:"${newItem.size || 'EMPTY'}"`, {
+            existingStatus: existingItem.status || 'undefined',
+            incomingStatus
+          });
+
+          if (incomingStatus) {
+            // Update status from request
+            existingItem.status = incomingStatus;
+
+            // Basic missingCount handling for create path:
+            // - If status is Missing, increment per save
+            // - Otherwise, preserve any existing missingCount
+            if (incomingStatus === 'Missing') {
+              const currentMissingCount =
+                typeof existingItem.missingCount === 'number'
+                  ? existingItem.missingCount
+                  : 0;
+              const newMissingCount = Math.max(currentMissingCount + 1, 1);
+              existingItem.missingCount = newMissingCount;
+              console.log(`📈 Incrementing missingCount in createMemberUniform for ${newItem.type}: ${currentMissingCount} → ${newMissingCount}`);
+            }
+
+            existingItems[existingIndex] = existingItem;
+            updatedExistingItems = true;
+            uniform.markModified('items');
+          } else {
+            console.log(`⏭️  Skipping duplicate item without incoming status change: ${newItem.type} size:"${newItem.size || 'EMPTY'}"`);
+          }
         }
       }
       
       itemsToDeduct = newItemsToAdd; // Only deduct for new items
       
-      // Add only non-duplicate items
-      if (newItemsToAdd.length > 0) {
-        console.log(`📝 Adding ${newItemsToAdd.length} new items to existing uniform collection`);
-        console.log(`   Items to add:`, newItemsToAdd.map((i: any) => `${i.category}/${i.type}/size:"${i.size || 'EMPTY'}"`).join(', '));
-        
-        uniform.items.push(...newItemsToAdd);
+      // Add only non-duplicate items and/or save updates to existing ones
+      if (newItemsToAdd.length > 0 || updatedExistingItems) {
+        if (newItemsToAdd.length > 0) {
+          console.log(`📝 Adding ${newItemsToAdd.length} new items to existing uniform collection`);
+          console.log(`   Items to add:`, newItemsToAdd.map((i: any) => `${i.category}/${i.type}/size:"${i.size || 'EMPTY'}"`).join(', '));
+          uniform.items.push(...newItemsToAdd);
+        }
         
         try {
-        await uniform.save({ session });
-          console.log(`✅ Added ${newItemsToAdd.length} new items to existing uniform collection for ${req.user.sispaId}`);
+          await uniform.save({ session });
+          console.log(`✅ Saved updates to existing uniform collection for ${req.user.sispaId}`);
+          console.log(`   New items added: ${newItemsToAdd.length}`);
           console.log(`   Total items in collection now: ${uniform.items.length}`);
           console.log(`   Saved uniform ID: ${uniform._id}`);
         } catch (saveError: any) {
@@ -5438,13 +5488,11 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
               existingItemRaw: JSON.stringify(existingItemObj)
             });
             
-            if (normalizedNewStatus === 'Missing') {
-              // ✅ NEW behavior: every time status is "Missing", increment by 1
-              // Start from the actual database value (even if 0) and increment
-              // This ensures 0→1, 1→2, 2→3, ... on every save with status Missing
+            // Increment ONLY when transitioning from a non-Missing status TO Missing
+            if (normalizedExistingStatus !== 'Missing' && normalizedNewStatus === 'Missing') {
               finalMissingCount = existingMissingCount + 1;
               console.log(
-                `📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status is Missing, existingMissingCount from DB: ${existingMissingCountValue})`
+                `📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status changed to Missing, existingMissingCount from DB: ${existingMissingCountValue})`
               );
             } else if (existingStatus === 'Missing' && newStatus !== 'Missing') {
               // Status changed from Missing to something else - keep count for history (don't reset)
@@ -5533,6 +5581,26 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
             });
             
             uniform.items[existingItemIndex] = updatedItem;
+
+            // CRITICAL: Also update any duplicate items (same category/type/size) so they share the same status/missingCount
+            // This prevents cases where one APM Tag is Missing but another duplicate still looks Available
+            try {
+              const updatedKey = getItemKey(updatedItem);
+              for (let i = 0; i < uniform.items.length; i++) {
+                if (i === existingItemIndex) continue;
+                const other = uniform.items[i];
+                const otherKey = getItemKey(other);
+                if (otherKey === updatedKey) {
+                  console.log(`   🔄 Syncing duplicate item status for ${other.type} (${other.size || 'no size'}) at index ${i} - Status: ${updatedItem.status}, MissingCount: ${updatedItem.missingCount ?? 0}`);
+                  (other as any).status = updatedItem.status;
+                  (other as any).missingCount = updatedItem.missingCount;
+                  uniform.items[i] = other;
+                }
+              }
+            } catch (syncErr) {
+              console.warn('⚠️  Error while syncing duplicate items status/missingCount:', syncErr);
+            }
+
             // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
             uniform.markModified('items');
             console.log(`✅ Updated existing item at index ${existingItemIndex}: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${updatedItem.status || 'not set'}, MissingCount: ${updatedItem.missingCount || 0}`);
@@ -5662,13 +5730,11 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
               existingItemRaw: JSON.stringify(existingItemObj)
             });
             
-            if (normalizedNewStatus === 'Missing') {
-              // CRITICAL: Every time status is "Missing", increment by 1
-              // Start from the actual database value (even if 0) and increment
-              // This ensures missingCount always increases: 0→1, 1→2, 2→3, etc.
-              // Ignore frontend's missingCount value - backend always calculates it
+            // Increment ONLY when transitioning from a non-Missing status TO Missing
+            if (normalizedExistingStatus !== 'Missing' && normalizedNewStatus === 'Missing') {
+              // Ignore frontend's missingCount value - backend always calculates it from DB
               finalMissingCount = existingMissingCount + 1;
-              console.log(`   📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status is Missing, existingMissingCount from DB: ${existingMissingCountValue})`);
+              console.log(`   📈 Incremented missingCount for ${newItem.type}: ${existingMissingCount} → ${finalMissingCount} (status changed to Missing, existingMissingCount from DB: ${existingMissingCountValue})`);
             } else if (existingStatus === 'Missing' && newStatus !== 'Missing') {
               // Status changed from Missing to something else - keep count for history (don't reset)
               // CRITICAL: Preserve missingCount even when status is not "Missing" so we can increment correctly later
@@ -5746,6 +5812,26 @@ export const updateMemberUniform = async (req: AuthRequest, res: Response) => {
               receivedDate: newItem.receivedDate !== undefined ? newItem.receivedDate : existingItem.receivedDate
             };
             uniform.items[existingItemIndex] = updatedItem;
+
+            // CRITICAL: Also update any duplicate items (same category/type/size) so they share the same status/missingCount
+            // This prevents cases where one APM Tag is Missing but another duplicate still looks Available
+            try {
+              const updatedKey = getItemKey(updatedItem);
+              for (let i = 0; i < uniform.items.length; i++) {
+                if (i === existingItemIndex) continue;
+                const other = uniform.items[i];
+                const otherKey = getItemKey(other);
+                if (otherKey === updatedKey) {
+                  console.log(`   🔄 Syncing duplicate item status for ${other.type} (${other.size || 'no size'}) at index ${i} - Status: ${updatedItem.status}, MissingCount: ${updatedItem.missingCount ?? 0}`);
+                  (other as any).status = updatedItem.status;
+                  (other as any).missingCount = updatedItem.missingCount;
+                  uniform.items[i] = other;
+                }
+              }
+            } catch (syncErr) {
+              console.warn('⚠️  Error while syncing duplicate items status/missingCount:', syncErr);
+            }
+
             // CRITICAL: Mark the items array as modified to ensure Mongoose saves the change
             uniform.markModified('items');
             console.log(`   ✅ Updated existing item at index ${existingItemIndex}: ${newItem.type} (${newItem.size || 'no size'}) - Status: ${updatedItem.status || 'not set'}, MissingCount: ${updatedItem.missingCount || 0}`);
